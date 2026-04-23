@@ -1,4 +1,5 @@
 import { createServer } from 'node:http';
+
 import request from 'supertest';
 
 const mockFetch = jest.fn();
@@ -12,7 +13,7 @@ jest.mock('../../src/kratos-role-webhook/config', () => ({
   },
 }));
 
-import { handleRequest, getUserRoles } from '../../src/kratos-role-webhook/handler';
+import { getUserRoles,handleRequest } from '../../src/kratos-role-webhook/handler';
 
 const app = createServer((req, res) => {
   handleRequest(req, res).catch(() => {
