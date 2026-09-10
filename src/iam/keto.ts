@@ -2,20 +2,15 @@ import { Configuration, RelationshipApi } from '@ory/client';
 
 import { MEMBERS, ROLE_NAMESPACE, Tuple } from './materialize';
 
-interface QueryResponse {
-  relation_tuples?: Tuple[];
-  next_page_token?: string;
-}
-
 /** Keto's admin API. Only the IAM holds the write URL. */
 export class KetoWriter {
-  private readonly relationships: RelationshipApi;
+  /** Keto serves reads and writes on separate ports, so each gets its own client. */
+  private readonly reads: RelationshipApi;
+  private readonly writes: RelationshipApi;
 
-  constructor(
-    private readonly writeUrl: string,
-    private readonly readUrl: string = writeUrl,
-  ) {
-    this.relationships = new RelationshipApi(new Configuration({ basePath: readUrl }));
+  constructor(writeUrl: string, readUrl: string = writeUrl) {
+    this.reads = new RelationshipApi(new Configuration({ basePath: readUrl }));
+    this.writes = new RelationshipApi(new Configuration({ basePath: writeUrl }));
   }
 
   /**
@@ -24,37 +19,26 @@ export class KetoWriter {
    * only thing that says whether the model has reached it.
    */
   async namespaces(): Promise<string[]> {
-    const { data } = await this.relationships.listRelationshipNamespaces();
+    const { data } = await this.reads.listRelationshipNamespaces();
     return (data.namespaces ?? []).flatMap((entry) => (entry.name === undefined ? [] : [entry.name]));
   }
 
   /** Every tuple matching the filter, following Keto's pagination to the end. */
   async query(params: Record<string, string>): Promise<Tuple[]> {
     const tuples: Tuple[] = [];
-    let pageToken = '';
+    let pageToken: string | undefined;
     do {
-      const query = new URLSearchParams(pageToken ? { ...params, page_token: pageToken } : params);
-      const response = await fetch(`${this.readUrl}/relation-tuples?${query.toString()}`);
-      if (!response.ok) throw new Error(`Keto query answered ${response.status}`);
-      const body = (await response.json()) as QueryResponse;
-      tuples.push(...(body.relation_tuples ?? []));
-      pageToken = body.next_page_token ?? '';
-    } while (pageToken);
+      const { data } = await this.reads.getRelationships({ ...asRequest(params), pageToken });
+      tuples.push(...((data.relation_tuples ?? []) as Tuple[]));
+      pageToken = data.next_page_token === '' ? undefined : data.next_page_token;
+    } while (pageToken !== undefined);
     return tuples;
   }
 
   /** Keto stores a second row for a tuple it already holds, so writing is delete-then-put. */
   async put(tuple: Tuple): Promise<void> {
     await this.deleteWhere(filterFor(tuple));
-    const response = await fetch(`${this.writeUrl}/admin/relation-tuples`, {
-      method: 'PUT',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(tuple),
-    });
-    if (!response.ok) {
-      const detail = await response.text();
-      throw new Error(`Keto rejected ${response.status} for ${describe(tuple)}: ${detail.trim()}`);
-    }
+    await this.writes.createRelationship({ createRelationshipBody: tuple });
   }
 
   async putAll(tuples: Tuple[]): Promise<void> {
@@ -77,15 +61,20 @@ export class KetoWriter {
 
   /** Removes every tuple matching a filter, which is how a role instance is retired. */
   async deleteWhere(params: Record<string, string>): Promise<void> {
-    const query = new URLSearchParams(params);
-    const response = await fetch(`${this.writeUrl}/admin/relation-tuples?${query.toString()}`, {
-      method: 'DELETE',
-    });
-    if (!response.ok) {
-      throw new Error(`Keto rejected ${response.status} deleting ${query.toString()}: ${(await response.text()).trim()}`);
-    }
+    await this.writes.deleteRelationships(asRequest(params));
   }
 }
+
+/** The filters this reads and writes by, under the names the client gives them. */
+const asRequest = (params: Record<string, string>) => ({
+  namespace: params['namespace'],
+  object: params['object'],
+  relation: params['relation'],
+  subjectId: params['subject_id'],
+  subjectSetNamespace: params['subject_set.namespace'],
+  subjectSetObject: params['subject_set.object'],
+  subjectSetRelation: params['subject_set.relation'],
+});
 
 /** The query that names exactly one tuple, and no other. */
 export const filterFor = (t: Tuple): Record<string, string> => ({
