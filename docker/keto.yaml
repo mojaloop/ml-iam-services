@@ -4,7 +4,9 @@ dsn: memory
 
 namespaces:
   - id: 0
-    name: role
+    name: Role
+  - id: 1
+    name: Resource
 
 serve:
   read:

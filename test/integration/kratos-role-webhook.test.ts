@@ -6,6 +6,8 @@ interface Identity {
   id: string;
   traits: {
     email: string;
+  };
+  metadata_public?: {
     roles?: string[];
   };
 }
@@ -108,9 +110,9 @@ describe('kratos-role-webhook integration', () => {
 
       const identityResponse = await fetch(`${KRATOS_ADMIN_URL}/admin/identities/${identityId}`);
       const identity = await identityResponse.json() as Identity;
-      expect(identity.traits.roles).toContain('admin');
-      expect(identity.traits.roles).toContain('user');
-      expect(identity.traits.roles).toContain('everyone');
+      expect(identity.metadata_public?.roles).toContain('admin');
+      expect(identity.metadata_public?.roles).toContain('user');
+      expect(identity.metadata_public?.roles).toContain('everyone');
     });
 
     it('should return error for missing fields', async () => {
