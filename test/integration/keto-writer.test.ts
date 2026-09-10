@@ -55,8 +55,6 @@ describe('the Keto client against a running Keto', () => {
     expect(b).toHaveLength(1);
   });
 
-  // Keto answers 100 tuples a page and a token for the rest, so this crosses
-  // the boundary: reading one page would return 100 of the 120.
   it('follows pagination to the end', async () => {
     const subjects = Array.from({ length: 120 }, (_, i) => `user-${i}`);
     await keto.putAll(subjects.map((s) => grant('writer-b', s)));

@@ -199,17 +199,12 @@ export async function buildHandler(
   };
 }
 
-/**
- * The model is published as a resource, and reaches the file Keto watches only
- * once the cluster has projected it, which takes as long as it takes. Applying
- * roles before then writes into namespaces Keto does not hold.
- */
 export async function waitForModel(keto: KetoWriter, namespace: string): Promise<void> {
   for (;;) {
     try {
       if ((await keto.namespaces()).includes(namespace)) return;
     } catch {
-      /* keto comes up alongside this, so first refusal is not a verdict */
+      /* empty */
     }
     console.log(`waiting for keto to read the model, namespace ${namespace}`);
     await new Promise((resolve) => setTimeout(resolve, 2000));

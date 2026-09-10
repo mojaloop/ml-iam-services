@@ -4,7 +4,6 @@ import { MEMBERS, ROLE_NAMESPACE, Tuple } from './materialize';
 
 /** Keto's admin API. Only the IAM holds the write URL. */
 export class KetoWriter {
-  /** Keto serves reads and writes on separate ports, so each gets its own client. */
   private readonly reads: RelationshipApi;
   private readonly writes: RelationshipApi;
 
@@ -13,11 +12,6 @@ export class KetoWriter {
     this.writes = new RelationshipApi(new Configuration({ basePath: writeUrl }));
   }
 
-  /**
-   * The namespaces Keto holds. It reads them from the file it watches, and
-   * reports readiness on its database and migrations alone, so this is the
-   * only thing that says whether the model has reached it.
-   */
   async namespaces(): Promise<string[]> {
     const { data } = await this.reads.listRelationshipNamespaces();
     return (data.namespaces ?? []).flatMap((entry) => (entry.name === undefined ? [] : [entry.name]));
@@ -65,7 +59,6 @@ export class KetoWriter {
   }
 }
 
-/** The filters this reads and writes by, under the names the client gives them. */
 const asRequest = (params: Record<string, string>) => ({
   namespace: params['namespace'],
   object: params['object'],
