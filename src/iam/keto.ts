@@ -1,3 +1,5 @@
+import { Configuration, RelationshipApi } from '@ory/client';
+
 import { MEMBERS, ROLE_NAMESPACE, Tuple } from './materialize';
 
 interface QueryResponse {
@@ -7,10 +9,24 @@ interface QueryResponse {
 
 /** Keto's admin API. Only the IAM holds the write URL. */
 export class KetoWriter {
+  private readonly relationships: RelationshipApi;
+
   constructor(
     private readonly writeUrl: string,
     private readonly readUrl: string = writeUrl,
-  ) {}
+  ) {
+    this.relationships = new RelationshipApi(new Configuration({ basePath: readUrl }));
+  }
+
+  /**
+   * The namespaces Keto holds. It reads them from the file it watches, and
+   * reports readiness on its database and migrations alone, so this is the
+   * only thing that says whether the model has reached it.
+   */
+  async namespaces(): Promise<string[]> {
+    const { data } = await this.relationships.listRelationshipNamespaces();
+    return (data.namespaces ?? []).flatMap((entry) => (entry.name === undefined ? [] : [entry.name]));
+  }
 
   /** Every tuple matching the filter, following Keto's pagination to the end. */
   async query(params: Record<string, string>): Promise<Tuple[]> {

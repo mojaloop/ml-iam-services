@@ -11,6 +11,7 @@ import { ServiceCatalog } from '../authzgen/types';
 import { config } from './config';
 import { Operator } from '../operator/server';
 import { KetoWriter } from './keto';
+import { ROLE_NAMESPACE } from './materialize';
 import { Applied, applyRoles, report } from './reconcile';
 import { Assignment, Provisioner } from './provisioner';
 import { ProvisionRequest } from './provision';
@@ -198,6 +199,23 @@ export async function buildHandler(
   };
 }
 
+/**
+ * The model is published as a resource, and reaches the file Keto watches only
+ * once the cluster has projected it, which takes as long as it takes. Applying
+ * roles before then writes into namespaces Keto does not hold.
+ */
+export async function waitForModel(keto: KetoWriter, namespace: string): Promise<void> {
+  for (;;) {
+    try {
+      if ((await keto.namespaces()).includes(namespace)) return;
+    } catch {
+      /* keto comes up alongside this, so first refusal is not a verdict */
+    }
+    console.log(`waiting for keto to read the model, namespace ${namespace}`);
+    await new Promise((resolve) => setTimeout(resolve, 2000));
+  }
+}
+
 /** Keto and Kratos come up alongside this, so first refusal is not a verdict. */
 async function waitFor(url: string, name: string): Promise<void> {
   for (;;) {
@@ -317,6 +335,7 @@ export async function start(options: StartOptions): Promise<void> {
 
   const keto = new KetoWriter(config.ketoWriteUrl, config.ketoReadUrl);
   await waitFor(`${config.ketoReadUrl}/health/ready`, 'keto');
+  await waitForModel(keto, ROLE_NAMESPACE);
   if (options.adminEmail !== undefined && options.kratosAdminUrl !== undefined) {
     if (options.adminRole === undefined) {
       throw new Error('--admin-role is required with --admin-email: the role is deployment configuration');
