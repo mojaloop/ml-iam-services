@@ -5,9 +5,9 @@ import request from 'supertest';
 import { CatalogPermission, ServiceCatalog } from '../../src/authzgen/types';
 import { KetoWriter } from '../../src/iam/keto';
 import { Tuple } from '../../src/iam/materialize';
+import { parseInstance, Provisioner } from '../../src/iam/provisioner';
 import { EXISTS, RESOURCE_NAMESPACE } from '../../src/iam/registry';
 import { indexCatalogs, RolesFile } from '../../src/iam/roles';
-import { parseInstance, Provisioner } from '../../src/iam/provisioner';
 import { buildHandler } from '../../src/iam/server';
 
 /** A Keto that keeps tuples in memory and answers the filters the IAM uses. */
@@ -37,10 +37,10 @@ class MemoryKeto extends KetoWriter {
       ...(tuple.subject_id !== undefined
         ? { subject_id: tuple.subject_id }
         : {
-            'subject_set.namespace': tuple.subject_set!.namespace,
-            'subject_set.object': tuple.subject_set!.object,
-            'subject_set.relation': tuple.subject_set!.relation,
-          }),
+          'subject_set.namespace': tuple.subject_set!.namespace,
+          'subject_set.object': tuple.subject_set!.object,
+          'subject_set.relation': tuple.subject_set!.relation,
+        }),
     });
     this.tuples.push(tuple);
   }
@@ -333,8 +333,8 @@ describe('the document routing the server', () => {
       openapi: '3.1.0',
       info: { title: 'IAM', version: '1' },
       paths: {
-        '/health': { get: { operationId: 'getHealth', responses: { '200': { description: 'ok' } } } },
-        '/surprise': { get: { operationId: 'getSurprise', responses: { '200': { description: 'ok' } } } },
+        '/health': { get: { operationId: 'getHealth', responses: { 200: { description: 'ok' } } } },
+        '/surprise': { get: { operationId: 'getSurprise', responses: { 200: { description: 'ok' } } } },
       },
     };
     await expect(buildHandler(provisioner, { catalog: [], roles: { roles: {} } }, definition)).rejects.toThrow(
@@ -348,7 +348,7 @@ describe('the document routing the server', () => {
     const definition = {
       openapi: '3.1.0',
       info: { title: 'IAM', version: '1' },
-      paths: { '/health': { get: { operationId: 'getHealth', responses: { '200': { description: 'ok' } } } } },
+      paths: { '/health': { get: { operationId: 'getHealth', responses: { 200: { description: 'ok' } } } } },
     };
     await expect(buildHandler(provisioner, { catalog: [], roles: { roles: {} } }, definition)).rejects.toThrow(
       /no operation for \[getCatalog/,

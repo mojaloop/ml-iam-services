@@ -1,20 +1,20 @@
-import { createServer, IncomingMessage, ServerResponse } from 'node:http';
 import { readFileSync } from 'node:fs';
+import { createServer, IncomingMessage, ServerResponse } from 'node:http';
 import { join } from 'node:path';
 
-import { OpenAPIBackend } from 'openapi-backend';
 import type { Context } from 'openapi-backend';
+import { OpenAPIBackend } from 'openapi-backend';
 import { parse as parseYaml } from 'yaml';
 
 import { accessRules, Migrations, ResourceNames } from '../authzgen/compose';
 import { ServiceCatalog } from '../authzgen/types';
-import { config } from './config';
 import { Operator } from '../operator/server';
+import { config } from './config';
 import { KetoWriter } from './keto';
 import { ROLE_NAMESPACE } from './materialize';
-import { Applied, applyRoles, report } from './reconcile';
-import { Assignment, Provisioner } from './provisioner';
 import { ProvisionRequest } from './provision';
+import { Assignment, Provisioner } from './provisioner';
+import { Applied, applyRoles, report } from './reconcile';
 import { indexCatalogs, openResourceNames, RolesFile, validateRoles } from './roles';
 import { startSourceSync } from './source-sync';
 
@@ -342,14 +342,14 @@ export async function start(options: StartOptions): Promise<void> {
     ...(options.migrations !== undefined ? { migrations: read<Migrations>(options.migrations) } : {}),
     ...(options.adminEmail !== undefined && options.adminRole !== undefined && options.kratosAdminUrl !== undefined
       ? {
-          admin: {
-            email: options.adminEmail,
-            role: options.adminRole,
-            kratosAdminUrl: options.kratosAdminUrl,
-            ...(options.kratosPublicUrl !== undefined ? { kratosPublicUrl: options.kratosPublicUrl } : {}),
-            ...(options.adminPassword !== undefined ? { password: options.adminPassword } : {}),
-          },
-        }
+        admin: {
+          email: options.adminEmail,
+          role: options.adminRole,
+          kratosAdminUrl: options.kratosAdminUrl,
+          ...(options.kratosPublicUrl !== undefined ? { kratosPublicUrl: options.kratosPublicUrl } : {}),
+          ...(options.adminPassword !== undefined ? { password: options.adminPassword } : {}),
+        },
+      }
       : {}),
   });
   for (const line of report(applied)) console.log(line);

@@ -1,5 +1,5 @@
-import { registryTuple } from './registry';
 import { Tuple } from './materialize';
+import { registryTuple } from './registry';
 
 /**
  * A service that creates a resource records only that it exists, keyed by

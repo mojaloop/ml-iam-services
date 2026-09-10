@@ -23,7 +23,7 @@
 
 const { match } = require('path-to-regexp');
 const { UNRESTRICTED, parseScope, idsInScope } = require('./header');
-const { readDocument, loadDocument, METHODS } = require('./document');
+const { readDocument, loadDocument } = require('./document');
 
 class Forbidden extends Error {
   constructor(message) {
@@ -76,6 +76,25 @@ const restrictedTo = (ids) => ({
   allows: (id) => ids.includes(id),
   narrow: (rows, idOf) => rows.filter((row) => ids.includes(idOf(row))),
 });
+
+/**
+ * A guard for a caller that reaches exactly this, by type. Whatever stands in
+ * for a decision — a job that runs for one participant, a test — builds one
+ * here, so what a guard is made of stays in this package and a service is
+ * given the same thing either way.
+ */
+const guardReaching = (access, service = '') => {
+  const guard = (req, type) => {
+    const visible = access[type];
+    if (visible === undefined) {
+      throw new GuardError(`${service}: this guard was not given "${type}"`);
+    }
+    return visible;
+  };
+  guard.scopedBy = () => Object.keys(access);
+  guard.service = service;
+  return guard;
+};
 
 /**
  * Reads a service's API document and answers requests against it.
@@ -143,4 +162,4 @@ const createGuard = async (document) => {
   return check;
 };
 
-module.exports = { createGuard, UNRESTRICTED, EVERYTHING, restrictedTo, Forbidden, GuardError, METHODS };
+module.exports = { createGuard, guardReaching, UNRESTRICTED, EVERYTHING, restrictedTo, Forbidden, GuardError };

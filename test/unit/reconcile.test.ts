@@ -20,7 +20,7 @@ const document = (service: string, path: string, scopedBy?: string[]) => {
           security: [{ session: [] }],
           ...(scopedBy ? { 'x-authz': { scopedBy } } : {}),
           responses: {
-            '200': { description: 'ok', content: { 'application/json': { schema: { type: 'array' } } } },
+            200: { description: 'ok', content: { 'application/json': { schema: { type: 'array' } } } },
           },
         },
       },

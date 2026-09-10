@@ -1,3 +1,4 @@
+import { emitCatalog, generate } from '../authzgen';
 import {
   compose,
   ComposedService,
@@ -7,7 +8,6 @@ import {
   ResourceNames,
   ungated,
 } from '../authzgen/compose';
-import { emitCatalog, generate } from '../authzgen';
 import { ServiceCatalog } from '../authzgen/types';
 
 /**

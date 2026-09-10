@@ -1,8 +1,8 @@
 import { JsonPointer } from 'json-ptr';
 
 import { ResourceNames, ResourceSource } from '../authzgen/compose';
-import { EXISTS, RESOURCE_NAMESPACE, SOURCED, parseResource, sourcedTuple } from './registry';
 import { Tuple } from './materialize';
+import { EXISTS, parseResource, RESOURCE_NAMESPACE, SOURCED, sourcedTuple } from './registry';
 
 /**
  * Keeps the registry holding what a noun's source answers: each id the source

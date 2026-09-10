@@ -1,7 +1,7 @@
 import { ResourceNames } from '../authzgen/compose';
 import { broken, permissionsOf, rolesNamed } from './exclusions';
 import { KetoWriter } from './keto';
-import { materializeRole, MEMBERS, membership, roleObject, ROLE_NAMESPACE } from './materialize';
+import { materializeRole, MEMBERS, membership, ROLE_NAMESPACE,roleObject } from './materialize';
 import { provision, ProvisionRequest } from './provision';
 import {
   EXISTS,

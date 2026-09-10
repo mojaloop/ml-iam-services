@@ -126,9 +126,9 @@ export async function applyRoles(
 export const report = (applied: Applied): string[] => [
   ...(applied.admin
     ? [
-        `${applied.admin.created ? 'Created' : 'Found'} ${applied.admin.email} (${applied.admin.id})` +
+      `${applied.admin.created ? 'Created' : 'Found'} ${applied.admin.email} (${applied.admin.id})` +
           (applied.admin.invited ? ', invited by email' : ''),
-      ]
+    ]
     : []),
   ...(applied.moved + applied.retired > 0 ? [`Moved ${applied.moved} grants, retired ${applied.retired}`] : []),
   `Applied ${applied.roles} roles as ${applied.tuples} tuples, ${applied.instances} instances refreshed`,

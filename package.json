@@ -56,7 +56,7 @@
     "snapshot": "npx commit-and-tag-version --no-verify --skip.changelog --prerelease snapshot --releaseCommitMessageFormat 'ci(snapshot): {{currentTag}}'"
   },
   "dependencies": {
-    "@mojaloop/authz": "^0.9.0",
+    "@mojaloop/authz": "^0.11.0",
     "@ory/client": "^1.22.66",
     "@scalar/openapi-parser": "^0.28.14",
     "commander": "^14.0.3",

@@ -32,6 +32,9 @@ const segments = (template) => template.split('/').filter((part) => part !== '')
 
 const paramName = (segment) => (segment.startsWith('{') && segment.endsWith('}') ? segment.slice(1, -1) : undefined);
 
+/** Path parameters in path order. */
+const pathParams = (template) => segments(template).map(paramName).filter((param) => param !== undefined);
+
 /**
  * The types the path itself carries an id for. A segment naming a type is
  * followed by the parameter carrying its id, which is the shape every
@@ -77,13 +80,48 @@ const readAuthz = (node, where) => {
     throw new DocumentError(`${where}: x-authz.permission must be a string`);
   }
   if (authz.scopedBy !== undefined) {
-    if (!Array.isArray(authz.scopedBy) || authz.scopedBy.some((type) => typeof type !== 'string')) {
-      throw new DocumentError(`${where}: x-authz.scopedBy must be an array of resource types`);
+    if (!Array.isArray(authz.scopedBy)) {
+      throw new DocumentError(`${where}: x-authz.scopedBy must be an array`);
     }
-    const duplicate = authz.scopedBy.find((type, at) => authz.scopedBy.indexOf(type) !== at);
+    for (const entry of authz.scopedBy) {
+      const one = typeof entry === 'object' && entry !== null && !Array.isArray(entry) && Object.keys(entry).length === 1;
+      if (typeof entry !== 'string' && !(one && typeof Object.values(entry)[0] === 'string')) {
+        throw new DocumentError(
+          `${where}: a scopedBy entry is a type, or one \`type: parameter\` binding, got ${JSON.stringify(entry)}`,
+        );
+      }
+    }
+    const types = authz.scopedBy.map((entry) => (typeof entry === 'string' ? entry : Object.keys(entry)[0]));
+    const duplicate = types.find((type, at) => types.indexOf(type) !== at);
     if (duplicate !== undefined) throw new DocumentError(`${where}: x-authz.scopedBy lists "${duplicate}" twice`);
   }
   return authz;
+};
+
+/**
+ * A written scopedBy is the whole truth: a `type: parameter` entry binds that
+ * parameter as the type's id, and a bare entry declares the type unbound. A
+ * bare entry naming a type the path binds would read as bound and not be, so
+ * it is refused.
+ */
+const scopedByOf = (entries, template, bound, where) => {
+  const params = pathParams(template);
+  return entries.map((entry) => {
+    if (typeof entry === 'string') {
+      const param = bound.get(entry);
+      if (param !== undefined) {
+        throw new DocumentError(
+          `${where}: the path binds ${entry} through {${param}}; write \`${entry}: ${param}\` or a bare type the path does not bind`,
+        );
+      }
+      return { type: entry };
+    }
+    const [type, param] = Object.entries(entry)[0];
+    if (!params.includes(param)) {
+      throw new DocumentError(`${where}: scopedBy binds ${type} to {${param}}, which is not a parameter of this path`);
+    }
+    return { type, param };
+  });
 };
 
 /** The base path from the first server entry, without a trailing slash. */
@@ -137,7 +175,10 @@ const readDocument = (doc) => {
       // By default an operation is scoped by the resource its outermost
       // parameter identifies; types deeper in the path are business data
       // inside it.
-      const declared = authz.scopedBy ?? [...bound.keys()].slice(0, 1);
+      const declared =
+        authz.scopedBy !== undefined
+          ? scopedByOf(authz.scopedBy, template, bound, where)
+          : [...bound.entries()].slice(0, 1).map(([type, param]) => ({ type, param }));
 
       operations.push({
         operationId: operation.operationId,
@@ -149,11 +190,8 @@ const readDocument = (doc) => {
         anonymous,
         /** A list of the rows a type names, which the service narrows itself. */
         list,
-        scopedBy: declared.map((type) => ({
-          type,
-          /** The path parameter carrying an id, when the path has one. */
-          param: bound.get(type),
-        })),
+        /** Each entry carries the path parameter holding an id, when the path binds one. */
+        scopedBy: declared,
       });
     }
   }

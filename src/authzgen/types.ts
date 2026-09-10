@@ -62,5 +62,3 @@ export interface ServiceCatalog {
   resourceTypes: string[];
   permissions: CatalogPermission[];
 }
-
-export class DeriveError extends Error {}

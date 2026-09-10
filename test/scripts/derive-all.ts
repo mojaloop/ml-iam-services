@@ -1,5 +1,5 @@
-import { loadSpec } from '../../src/authzgen/index';
 import { derive } from '../../src/authzgen/derive';
+import { loadSpec } from '../../src/authzgen/index';
 
 async function main(): Promise<void> {
   for (const rel of process.argv.slice(2)) {

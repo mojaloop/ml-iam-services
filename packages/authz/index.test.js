@@ -3,7 +3,7 @@
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
 
-const { createGuard, UNRESTRICTED, Forbidden, GuardError } = require('./index');
+const { createGuard, guardReaching, restrictedTo, EVERYTHING, UNRESTRICTED, Forbidden, GuardError } = require('./index');
 
 const doc = {
   openapi: '3.1.0',
@@ -119,4 +119,56 @@ test('an unknown x-authz key is refused at startup', async () => {
   const bad = structuredClone(doc);
   bad.paths['/widgets'].get['x-authz'] = { resources: ['widgets'] };
   await assert.rejects(() => createGuard(bad), /unknown x-authz key/);
+});
+
+const bound = structuredClone(doc);
+bound.paths['/gadgets/{gadgetId}/widgets/{widgetId}'] = {
+  get: {
+    operationId: 'getGadgetWidget',
+    summary: 'Reads one widget of one gadget',
+    security: [{ session: [] }],
+    'x-authz': { scopedBy: [{ widgets: 'widgetId' }] },
+    responses: { '200': { description: 'ok' } },
+  },
+};
+
+test('a binding names the parameter the path carries the type its id in', async () => {
+  const guard = await createGuard(bound);
+  const request = req('/api/gadgets/g1/widgets/w1', 'widgets=w1');
+  assert.deepEqual(guard.scopedBy(request), []);
+  assert.equal(guard(request, 'widgets').allows('w1'), true);
+});
+
+test('a binding to a parameter the path does not have is refused at startup', async () => {
+  const bad = structuredClone(bound);
+  bad.paths['/gadgets/{gadgetId}/widgets/{widgetId}'].get['x-authz'] = { scopedBy: [{ widgets: 'nope' }] };
+  await assert.rejects(() => createGuard(bad), /binds widgets to \{nope\}/);
+});
+
+test('a bare type the path binds is refused, because it would read as unbound', async () => {
+  const bad = structuredClone(bound);
+  bad.paths['/gadgets/{gadgetId}/widgets/{widgetId}'].get['x-authz'] = { scopedBy: ['widgets'] };
+  await assert.rejects(() => createGuard(bad), /the path binds widgets through \{widgetId\}/);
+});
+
+test('a guard can be built from what a caller reaches, for whatever stands in for a decision', () => {
+  const guard = guardReaching({ widgets: restrictedTo(['w1']), reports: EVERYTHING }, 'example');
+  assert.deepEqual(guard.scopedBy().sort(), ['reports', 'widgets']);
+  assert.equal(guard({}, 'widgets').allows('w1'), true);
+  assert.equal(guard({}, 'widgets').allows('w2'), false);
+  assert.equal(guard({}, 'reports').restricted, false);
+  assert.equal(guard.service, 'example');
+});
+
+test('a guard built from what a caller reaches refuses a type it was not given', () => {
+  const guard = guardReaching({ widgets: EVERYTHING });
+  assert.throws(() => guard({}, 'reports'), GuardError);
+});
+
+test('a scopedBy entry that is neither a type nor one binding is refused at startup', async () => {
+  const bad = structuredClone(bound);
+  bad.paths['/gadgets/{gadgetId}/widgets/{widgetId}'].get['x-authz'] = {
+    scopedBy: [{ widgets: 'widgetId', gadgets: 'gadgetId' }],
+  };
+  await assert.rejects(() => createGuard(bad), /a scopedBy entry is a type, or one/);
 });

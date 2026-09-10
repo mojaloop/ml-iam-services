@@ -1,4 +1,4 @@
-import { KetoWriter, filterFor } from '../../src/iam/keto';
+import { filterFor,KetoWriter } from '../../src/iam/keto';
 import { MEMBERS, ROLE_NAMESPACE, Tuple } from '../../src/iam/materialize';
 
 const KETO_WRITE_URL = process.env.KETO_WRITE_URL || 'http://localhost:4467';

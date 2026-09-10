@@ -1,4 +1,4 @@
-import { GenericKind, K8s, RegisterKind, WatchCfg, kind } from 'kubernetes-fluent-client';
+import { GenericKind, K8s, kind,RegisterKind, WatchCfg } from 'kubernetes-fluent-client';
 import { WatchPhase } from 'kubernetes-fluent-client/dist/fluent/shared-types';
 
 import { AuthzDocumentResource } from './sources';

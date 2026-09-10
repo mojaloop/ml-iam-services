@@ -1,7 +1,8 @@
+import { DocumentError } from '@mojaloop/authz/document';
+
 import { derive } from '../../src/authzgen/derive';
 import { emitModel } from '../../src/authzgen/emit-model';
 import { emitRules } from '../../src/authzgen/emit-rules';
-import { DeriveError } from '../../src/authzgen/types';
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
 
@@ -130,7 +131,7 @@ describe('authzgen derivation', () => {
 
   describe('rejections', () => {
     const rejects = (doc: unknown, message: RegExp) => {
-      expect(() => derive(doc)).toThrow(DeriveError);
+      expect(() => derive(doc)).toThrow(DocumentError);
       expect(() => derive(doc)).toThrow(message);
     };
 

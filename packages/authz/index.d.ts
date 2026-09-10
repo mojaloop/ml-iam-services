@@ -32,6 +32,8 @@ export class GuardError extends Error {}
 export type Guard = ((req: unknown | typeof UNRESTRICTED, type: string) => Access) & {
   /** The service the document names. */
   service: string;
+  /** The types this request's operation hands the service to narrow its own answer by. */
+  scopedBy(req: unknown | typeof UNRESTRICTED): string[];
 };
 
 /**
@@ -41,3 +43,10 @@ export type Guard = ((req: unknown | typeof UNRESTRICTED, type: string) => Acces
  * @param document  a path to the document, or one already parsed
  */
 export function createGuard(document: string | object): Promise<Guard>;
+
+/**
+ * A guard for a caller that reaches exactly this, by type. Whatever stands in
+ * for a decision — a job that runs for one participant, a test — builds one
+ * here, so what a guard is made of stays in this package.
+ */
+export function guardReaching(access: Record<string, Access>, service?: string): Guard;

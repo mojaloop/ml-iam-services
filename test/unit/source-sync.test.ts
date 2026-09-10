@@ -1,6 +1,6 @@
 import { ResourceNames } from '../../src/authzgen/compose';
 import { Tuple } from '../../src/iam/materialize';
-import { idsFrom, startSourceSync, SourceShapeError, syncTarget, targetsOf } from '../../src/iam/source-sync';
+import { idsFrom, SourceShapeError, startSourceSync, syncTarget, targetsOf } from '../../src/iam/source-sync';
 
 const names: ResourceNames = {
   resourceNames: {

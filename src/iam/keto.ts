@@ -77,10 +77,10 @@ export const filterFor = (t: Tuple): Record<string, string> => ({
   ...(t.subject_id !== undefined
     ? { subject_id: t.subject_id }
     : {
-        'subject_set.namespace': t.subject_set!.namespace,
-        'subject_set.object': t.subject_set!.object,
-        'subject_set.relation': t.subject_set!.relation,
-      }),
+      'subject_set.namespace': t.subject_set!.namespace,
+      'subject_set.object': t.subject_set!.object,
+      'subject_set.relation': t.subject_set!.relation,
+    }),
 });
 
 export const describe = (t: Tuple): string =>
