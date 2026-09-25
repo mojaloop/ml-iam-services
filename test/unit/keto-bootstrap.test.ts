@@ -36,6 +36,27 @@ describe('applying roles before Keto has read the model', () => {
     expect(asked).toBe(3);
   });
 
+  it('clears a role only of grants in namespaces the model still has', async () => {
+    const keto = new KetoWriter('http://keto-write', 'http://keto-read');
+    const grant = (namespace: string) => ({
+      namespace,
+      object: '__self__',
+      relation: 'view',
+      subject_set: { namespace: ROLE_NAMESPACE, object: 'intapi-client', relation: 'members' },
+    });
+    keto.query = async () => [grant('intapi'), grant('lookup')];
+    keto.namespaces = async () => [ROLE_NAMESPACE, 'lookup'];
+    const deleted: string[] = [];
+    keto.deleteWhere = async (params) => {
+      if (params['namespace'] !== 'lookup') throw new Error(`Keto has no namespace ${params['namespace']}`);
+      deleted.push(params['namespace']);
+    };
+
+    await keto.clearGrantsOf('intapi-client');
+
+    expect(deleted).toEqual(['lookup']);
+  });
+
   it('returns at once when the model is already there', async () => {
     const keto = new KetoWriter('http://keto-write', 'http://keto-read');
     const remaining = holding(keto, [[ROLE_NAMESPACE]]);

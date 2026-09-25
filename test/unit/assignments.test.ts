@@ -49,6 +49,10 @@ class MemoryKeto extends KetoWriter {
     const doomed = await this.query(params);
     this.tuples = this.tuples.filter((t) => !doomed.includes(t));
   }
+
+  override async namespaces(): Promise<string[]> {
+    return ['Role', 'Resource', 'reports'];
+  }
 }
 
 const RN: Record<string, string> = { reports: 'Report', participants: 'Participant' };

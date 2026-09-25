@@ -50,7 +50,10 @@ export class KetoWriter {
       'subject_set.object': roleObject,
       'subject_set.relation': MEMBERS,
     });
-    for (const tuple of held) await this.deleteWhere(filterFor(tuple));
+    const modelled = new Set(await this.namespaces());
+    for (const tuple of held) {
+      if (modelled.has(tuple.namespace)) await this.deleteWhere(filterFor(tuple));
+    }
   }
 
   /** Removes every tuple matching a filter, which is how a role instance is retired. */
