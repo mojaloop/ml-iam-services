@@ -77,11 +77,13 @@ export class Operator {
 
   async start(): Promise<Reconciled> {
     const first = await this.run();
-    this.watcher = await watchInputs(async () => {
-      await this.run();
-    });
-    this.timer = setInterval(() => void this.run(), this.options.refreshMs ?? REFRESH_MS);
+    this.watcher = await watchInputs(async () => this.schedule());
+    this.timer = setInterval(() => this.schedule(), this.options.refreshMs ?? REFRESH_MS);
     return first;
+  }
+
+  private schedule(): void {
+    this.run().catch((error) => console.error(JSON.stringify({ event: 'reconcile-failed', error: String(error) })));
   }
 
   stop(): void {
