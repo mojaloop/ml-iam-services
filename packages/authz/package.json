@@ -1,6 +1,6 @@
 {
   "name": "@mojaloop/authz",
-  "version": "0.11.0",
+  "version": "0.13.2",
   "description": "The authorization contract services speak with the platform",
   "license": "Apache-2.0",
   "author": "Mojaloop Foundation",
@@ -9,39 +9,44 @@
     "url": "git+https://github.com/mojaloop/ml-iam-services.git",
     "directory": "packages/authz"
   },
-  "main": "index.js",
-  "types": "index.d.ts",
+  "type": "module",
+  "main": "dist/index.cjs",
+  "module": "dist/index.js",
+  "types": "dist/index.d.ts",
   "exports": {
     ".": {
-      "types": "./index.d.ts",
-      "default": "./index.js"
+      "import": { "types": "./dist/index.d.ts", "default": "./dist/index.js" },
+      "require": { "types": "./dist/index.d.cts", "default": "./dist/index.cjs" }
     },
     "./gateway": {
-      "types": "./gateway.d.ts",
-      "default": "./gateway.js"
+      "import": { "types": "./dist/gateway.d.ts", "default": "./dist/gateway.js" },
+      "require": { "types": "./dist/gateway.d.cts", "default": "./dist/gateway.cjs" }
     },
     "./document": {
-      "types": "./document.d.ts",
-      "default": "./document.js"
+      "import": { "types": "./dist/document.d.ts", "default": "./dist/document.js" },
+      "require": { "types": "./dist/document.d.cts", "default": "./dist/document.cjs" }
     }
   },
   "files": [
-    "index.js",
-    "index.d.ts",
-    "document.js",
-    "document.d.ts",
-    "header.js",
-    "gateway.js",
-    "gateway.d.ts"
+    "dist"
   ],
   "engines": {
-    "node": ">=24.x"
+    "node": ">=22"
   },
   "dependencies": {
     "path-to-regexp": "^8.4.2",
-    "yaml": "^2.9.0"
+    "yaml": "^2.9.1"
+  },
+  "devDependencies": {
+    "@types/node": "^26.6.1",
+    "tsdown": "^0.23.0",
+    "typescript": "^7.0.2",
+    "vitest": "^5.0.1"
   },
   "scripts": {
-    "test": "node --test"
+    "build": "tsdown",
+    "typecheck": "tsc",
+    "test": "vitest run",
+    "prepublishOnly": "npm run build"
   }
 }

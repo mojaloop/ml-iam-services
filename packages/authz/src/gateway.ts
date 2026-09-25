@@ -1,5 +1,3 @@
-'use strict';
-
 /**
  * The platform's side of the contract: turning a decision into what a service
  * will be able to read with `createGuard`.
@@ -9,6 +7,5 @@
  * but this one.
  */
 
-const { HEADER, NONE, formatScope, scopeHeaders, parseScope } = require('./header');
-
-module.exports = { HEADER, NONE, formatScope, scopeHeaders, parseScope };
+export { HEADER, NONE, formatScope, scopeHeaders, parseScope } from '~/header';
+export type { Scope, ScopeEntry, RequestHeaders } from '~/header';
