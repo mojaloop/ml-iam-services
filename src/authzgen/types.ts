@@ -2,7 +2,7 @@
  * A resource type the operation is about. `captureIndex` is present when the
  * path binds an id for it, which is what makes the type a checked object.
  * `resourceName` is the deployment's canonical name for the one real thing
- * this spelling is a member of; inside the platform the resource name keys
+ * this spelling is a member of; inside the deployment the resource name keys
  * the resource, and the spelling exists only at the service's boundary.
  */
 export interface ScopedType {
@@ -22,8 +22,6 @@ export interface Permission {
   path: string;
   summary?: string;
   deprecated: boolean;
-  anonymous: boolean;
-  authenticators: string[];
   scopedBy: ScopedType[];
 }
 
@@ -57,6 +55,8 @@ export interface CatalogPermission {
 
 export interface ServiceCatalog {
   service: string;
+  /** The Keto namespace the service's grants live in. */
+  namespace: string;
   title: string;
   basePath: string;
   resourceTypes: string[];

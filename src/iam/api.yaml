@@ -13,9 +13,6 @@ info:
     operators may do with roles and assignments is gated on the way in, by the
     role administration service that fronts this one.
 
-x-authz:
-  service: iamProvisioning
-
 servers:
   - url: /
 
@@ -36,7 +33,9 @@ paths:
       description: >-
         The catalog it validated against, the roles and exclusions it read, and
         the record of applying them: how many tuples, which role instances were
-        refreshed or retired, and every holding that breaks an exclusion.
+        refreshed or retired, and every holding that breaks an exclusion. Roles
+        and exclusions naming a service no route has brought yet are listed as
+        pending.
       security: []
       x-authz:
         scopedBy: []

@@ -5,6 +5,7 @@ import { join } from 'node:path';
 import { compose, ComposedService, diffCatalogs, ungated } from '../../src/authzgen/compose';
 import { derive } from '../../src/authzgen/derive';
 import { CANONICAL_STUBS } from '../../src/authzgen/emit-model';
+import { ketoNamespace } from '../../src/authzgen/keto-name';
 import { CatalogPermission, ServiceBundle, ServiceCatalog } from '../../src/authzgen/types';
 import { indexCatalogs } from '../../src/iam/roles';
 import { readCatalogs } from '../../src/iam/server';
@@ -23,6 +24,7 @@ const permission = (id: string, scopedBy: string[] = [], bound: string[] = []): 
 
 const catalog = (service: string, permissions: CatalogPermission[]): ServiceCatalog => ({
   service,
+  namespace: service,
   title: service,
   basePath: '',
   resourceTypes: [...new Set(permissions.flatMap((p) => p.scopedBy))].sort(),
@@ -43,7 +45,7 @@ const bundle = (service: string, permissions: CatalogPermission[]): ServiceBundl
     summary: p.summary,
     deprecated: false,
     anonymous: false,
-    authenticators: ['cookie_session'],
+    security: ['apiKey:cookie'],
     scopedBy: p.scopedBy.map((type) =>
       p.bound.includes(type) ? { type, param: `${type}Id`, captureIndex: 1 } : { type },
     ),
@@ -137,30 +139,45 @@ describe('composing a deployment', () => {
     ]);
   });
 
-  it('refuses a resource name for a service this deployment does not compose', () => {
+  /**
+   * A deployment names its vocabulary once, for every service it may run; one
+   * not running, or held, binds nothing and stops nothing else.
+   */
+  it('reports a resource name member whose service is not composed, and composes the rest', () => {
     const rows = [service('reports', [permission('reports.getRow', ['participants'])])];
-    expect(
-      compose(rows, {
-        resourceNames: {
-          Participant: {
-            label: 'Participant',
-            members: [
-              { service: 'reports', type: 'participants' },
-              { service: 'ledger', type: 'participants' },
-            ],
-          },
+    const composition = compose(rows, {
+      resourceNames: {
+        Participant: {
+          label: 'Participant',
+          members: [
+            { service: 'reports', type: 'participants' },
+            { service: 'ledger', type: 'participants' },
+          ],
         },
-      }).problems,
-    ).toEqual(['resource name Participant lists ledger, which this deployment does not compose']);
+      },
+    });
+    expect(composition.problems).toEqual([]);
+    expect(composition.unbound).toEqual(['resource name Participant lists ledger, which this deployment does not compose']);
   });
 
-  it('refuses a service name Keto cannot make a namespace of', () => {
-    const doc = (name: string) => ({
-      'x-authz': { service: name },
-      paths: { '/x': { get: { operationId: 'get', summary: 'x', security: [] } } },
-    });
-    expect(() => derive(doc('portal-shell'))).toThrow(/not a name a Keto namespace can take/);
-    expect(() => derive(doc('portalShell'))).not.toThrow();
+  it('keeps a prefix that is an identifier as its Keto namespace, and encodes any other', () => {
+    expect(ketoNamespace('portalShell')).toBe('portalShell');
+    expect(ketoNamespace('portal-shell')).toBe('portal_2d_shell');
+    expect(ketoNamespace('2fa')).toBe('_2fa');
+  });
+
+  it('refuses two prefixes meeting on one Keto namespace', () => {
+    const { problems } = compose([
+      service('portal-shell', [permission('portal-shell.get')]),
+      service('portal_2d_shell', [permission('portal_2d_shell.get')]),
+    ]);
+    expect(problems).toContain('portal-shell and portal_2d_shell are both Keto namespace portal_2d_shell');
+  });
+
+  it('refuses a prefix a permission id cannot carry', () => {
+    const doc = { paths: { '/x': { get: { operationId: 'get', summary: 'x', security: [] } } } };
+    expect(() => derive(doc, 'portal.shell')).toThrow(/is not a permission prefix/);
+    expect(() => derive(doc, 'portal-shell')).not.toThrow();
   });
 });
 

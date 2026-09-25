@@ -1,89 +1,65 @@
-import { readdir, readFile } from 'node:fs/promises';
-import { extname, join } from 'node:path';
+import { DOCUMENT_PATH } from '@mojaloop/authz';
 
-import { parse as parseYaml } from 'yaml';
-
-import { Declared } from './reconcile';
+import { readSpec } from '../authzgen';
 
 /**
- * Where a document comes from.
- *
- * A chart mounts what it ships, and an operator writes a custom resource for
- * a surface that changes while the deployment runs. Both produce the same
- * thing, so the reconciler never learns which is which.
+ * Where a backend's document comes from: the backend itself, answering the
+ * document path through its Service, or an AuthzDocument its route names. Both
+ * are read by the same reader, so nothing downstream can tell which answered.
  */
-
-/** A registration file: a document to read, and where its service is served. */
-export interface Registration {
-  name?: string;
-  spec: string;
-  host?: string;
-  path?: string;
-  url?: { host?: string; path?: string };
-}
-
-const parseDocument = (text: string, origin: string): unknown =>
-  extname(origin) === '.json' ? JSON.parse(text) : parseYaml(text);
-
-/**
- * The services a registry lists. A deployment's values name them under `authz`
- * and the file a chart mounts holds the list on its own, so both are read here
- * and everything downstream sees one shape.
- */
-export const readRegistry = (text: string, origin: string): Registration[] => {
-  const parsed = parseDocument(text, origin) as Registration[] | { authz?: Registration[] };
-  return Array.isArray(parsed) ? parsed : (parsed?.authz ?? []);
-};
-
-/** The documents a chart mounted, read from a registry file listing them. */
-export async function fromRegistry(file: string): Promise<Declared[]> {
-  const entries = readRegistry(await readFile(file, 'utf8'), file);
-
-  return Promise.all(
-    entries.map(async (entry) => ({
-      origin: entry.name ?? entry.spec,
-      document: parseDocument(await readFile(entry.spec, 'utf8'), entry.spec),
-      serving: { host: entry.host ?? entry.url?.host, path: entry.path ?? entry.url?.path },
-    })),
-  );
-}
-
-/** Every document in a directory, for a chart that mounts them side by side. */
-export async function fromDirectory(dir: string): Promise<Declared[]> {
-  const names = (await readdir(dir)).filter((name) => ['.yaml', '.yml', '.json'].includes(extname(name))).sort();
-
-  return Promise.all(
-    names.map(async (name) => ({
-      origin: join(dir, name),
-      document: parseDocument(await readFile(join(dir, name), 'utf8'), name),
-      serving: {},
-    })),
-  );
-}
 
 /** The shape of an AuthzDocument, as its custom resource definition declares it. */
 export interface AuthzDocumentResource {
-  metadata?: { name?: string; generation?: number };
-  spec?: {
-    document?: string;
-    url?: { host?: string; path?: string };
-  };
+  metadata?: { name?: string; namespace?: string; generation?: number };
+  spec?: { document?: Record<string, unknown> };
+}
+
+export const documentId = (resource: AuthzDocumentResource): string =>
+  `${resource.metadata?.namespace ?? 'default'}/${resource.metadata?.name ?? '(unnamed)'}`;
+
+/** Reads the document an AuthzDocument carries. */
+export async function fromResource(resource: AuthzDocumentResource): Promise<unknown> {
+  const id = documentId(resource);
+  const document = resource.spec?.document;
+  if (document === undefined || typeof document !== 'object' || Array.isArray(document)) {
+    throw new Error(`AuthzDocument/${id}: spec.document is not an OpenAPI document`);
+  }
+  return readSpec(document, `AuthzDocument/${id}`);
+}
+
+/** A request that takes longer than this is a backend that is not answering. */
+const TIMEOUT_MS = 10_000;
+
+interface Fetched {
+  etag?: string;
+  document: unknown;
 }
 
 /**
- * What a custom resource declares, read the same way a mounted file is. The
- * document is text inside the resource, because whoever writes it generated it
- * and has nowhere to put a file the platform can reach.
+ * Reads what backends serve, remembering each answer's ETag so an unchanged
+ * document costs a 304 rather than a re-read.
  */
-export function fromResource(resource: AuthzDocumentResource): Declared {
-  const name = resource.metadata?.name ?? '(unnamed)';
-  const text = resource.spec?.document;
-  if (typeof text !== 'string' || text.trim() === '') {
-    throw new Error(`AuthzDocument ${name}: spec.document is empty`);
+export class ServedDocuments {
+  private readonly seen = new Map<string, Fetched>();
+
+  /** The URL a backend answers its document on, inside the cluster. */
+  static urlOf(namespace: string, name: string, port: number): string {
+    return `http://${name}.${namespace}.svc:${port}${DOCUMENT_PATH}`;
   }
-  return {
-    origin: `AuthzDocument/${name}`,
-    document: parseYaml(text),
-    serving: { host: resource.spec?.url?.host, path: resource.spec?.url?.path },
-  };
+
+  async read(url: string): Promise<unknown> {
+    const known = this.seen.get(url);
+    const response = await fetch(url, {
+      headers: known?.etag !== undefined ? { 'if-none-match': known.etag } : {},
+      signal: AbortSignal.timeout(TIMEOUT_MS),
+    });
+    if (response.status === 304 && known !== undefined) return known.document;
+    if (!response.ok) throw new Error(`${url} answered ${response.status}`);
+
+    const body = (await response.json()) as Record<string, unknown>;
+    const document = await readSpec(body, url);
+    const etag = response.headers.get('etag') ?? undefined;
+    this.seen.set(url, { document, ...(etag !== undefined ? { etag } : {}) });
+    return document;
+  }
 }

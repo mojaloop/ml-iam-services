@@ -17,6 +17,7 @@ const permission = (id: string): CatalogPermission => ({
 
 const catalog: ServiceCatalog = {
   service: 'settlement',
+  namespace: 'settlement',
   title: 'Settlement',
   basePath: '',
   resourceTypes: [],

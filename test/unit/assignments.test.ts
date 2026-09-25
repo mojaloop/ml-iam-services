@@ -68,6 +68,7 @@ const permission = (id: string, scopedBy: string[], bound: string[]): CatalogPer
 
 const catalog: ServiceCatalog = {
   service: 'reports',
+  namespace: 'reports',
   title: 'Reporting',
   basePath: '',
   resourceTypes: ['reports', 'participants'],

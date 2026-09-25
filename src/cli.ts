@@ -1,27 +1,13 @@
 #!/usr/bin/env node
 
-import { readFileSync } from 'node:fs';
-
 import { Command } from 'commander';
 import { config } from 'dotenv';
-import { parse as parseYaml } from 'yaml';
 
-import {
-  composeToDir,
-  diffCatalogs,
-  generateToDir,
-  Migrations,
-  ResourceNames,
-  ServiceCatalog,
-  ServiceRegistration,
-  ungated,
-} from './authzgen/index';
 import { start as startCapabilities } from './capabilities/server';
 import { start as startDecision } from './decision/server';
 import { start as startProvisioning } from './iam/server';
 import { start as startKetoBatchAuth } from './keto-batch-auth/server';
 import { start as startKratosRoleWebhook } from './kratos-role-webhook/server';
-import { readRegistry } from './operator/sources';
 
 config();
 
@@ -77,101 +63,12 @@ program
   )
   .option(
     '--namespace <namespace>',
-    'namespace whose AuthzDocuments this reconciles',
+    'namespace the composed rules and catalog are published into',
     process.env.POD_NAMESPACE,
   )
-  .option('--registry <path>', 'a registry of documents the chart mounted, composed with them')
   .option('--resource-names <path>', "the deployment's names for one thing across services")
   .option('--publish-as <name>', 'ConfigMap the composed rules and catalog are published as')
+  .option('--webhook-cert-dir <dir>', 'tls.crt and tls.key to answer AuthzDocument admission with')
   .action(startProvisioning);
-
-program
-  .command('authzgen')
-  .description('Generate the authz bundle from an annotated OpenAPI document')
-  .requiredOption('-s, --spec <path>', 'path to the OpenAPI document')
-  .requiredOption('-o, --out <dir>', 'directory to write the bundle into')
-  .option('-H, --host <host>', 'host the service is served on')
-  .option('-p, --path <path>', 'mount path when served under a prefix')
-  .option('-n, --resource-names <path>', "the deployment's names for one thing across services")
-  .action(
-    async (options: {
-      spec: string;
-      out: string;
-      host?: string;
-      path?: string;
-      resourceNames?: string;
-    }) => {
-      const names: ResourceNames = options.resourceNames
-        ? (parseYaml(readFileSync(options.resourceNames, 'utf8')) as ResourceNames)
-        : {};
-      const bundle = await generateToDir(
-        options.spec,
-        options.out,
-        {
-          host: options.host,
-          path: options.path,
-        },
-        names,
-      );
-      console.log(
-        `${bundle.service}: ${bundle.permissions.length} operations, ` +
-          `resource types [${bundle.resourceTypes.join(', ')}] -> ${options.out}`,
-      );
-    },
-  );
-
-program
-  .command('compose')
-  .description("Stage every registered service's authz surface for one rollout")
-  .requiredOption(
-    '-r, --registry <path>',
-    'the services this deployment runs, with where each is served',
-  )
-  .requiredOption('-o, --out <dir>', 'directory to stage into')
-  .option('-n, --resource-names <path>', "the deployment's names for one thing across services")
-  .option(
-    '-p, --previous <path>',
-    'the catalog this rollout replaces, to see what it does to existing grants',
-  )
-  .option('-m, --migrations <path>', 'where the grants of a removed or changed permission go')
-  .action(
-    async (options: {
-      registry: string;
-      out: string;
-      resourceNames?: string;
-      previous?: string;
-      migrations?: string;
-    }) => {
-      const read = <T>(path: string): T => parseYaml(readFileSync(path, 'utf8')) as T;
-      const registry = readRegistry(
-        readFileSync(options.registry, 'utf8'),
-        options.registry,
-      ) as ServiceRegistration[];
-      const names: ResourceNames = options.resourceNames ? read(options.resourceNames) : {};
-
-      const composition = await composeToDir(registry, options.out, names);
-      for (const service of Object.keys(composition.rules)) {
-        const catalog = composition.catalog.find((c) => c.service === service)!;
-        console.log(`${service}: ${catalog.permissions.length} permissions`);
-      }
-
-      if (options.previous !== undefined) {
-        const diff = diffCatalogs(read<ServiceCatalog[]>(options.previous), composition.catalog);
-        const migrations: Migrations = options.migrations ? read(options.migrations) : {};
-        for (const id of diff.added) console.log(`  + ${id}`);
-        for (const id of diff.removed) console.log(`  - ${id} -> ${migrations[id] ?? 'nowhere'}`);
-        for (const c of diff.changed) console.log(`  ~ ${c.id}: ${c.was} -> ${c.now}`);
-        composition.problems.push(...ungated(diff, migrations));
-      }
-
-      if (composition.problems.length > 0) {
-        console.error(
-          `\nthis deployment does not compose:\n  ${composition.problems.join('\n  ')}`,
-        );
-        process.exit(1);
-      }
-      console.log(`\nStaged into ${options.out}`);
-    },
-  );
 
 program.parse();

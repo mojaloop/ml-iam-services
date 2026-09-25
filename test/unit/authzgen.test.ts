@@ -37,17 +37,20 @@ const typesOf = (paths: Record<string, unknown>): string[] => {
   return [...types].sort();
 };
 
+/** The namespace the route is annotated with, which every fixture derives under. */
+const SERVICE = 'example';
+
 const spec = (paths: Record<string, unknown>, resourceTypes: string[] = typesOf(paths)) => ({
   openapi: '3.0.1',
   info: { title: 'Example API' },
   servers: [{ url: '/api' }],
-  'x-authz': { service: 'example', ...(resourceTypes.length > 0 ? { resourceTypes } : {}) },
+  ...(resourceTypes.length > 0 ? { 'x-authz': { resourceTypes } } : {}),
   components: { securitySchemes: schemes },
   paths,
 });
 
 const permissionOf = (doc: any, id: string) => {
-  const found = derive(doc).permissions.find((p) => p.id === id);
+  const found = derive(doc, SERVICE).permissions.find((p) => p.id === id);
   if (!found) throw new Error(`no permission ${id}`);
   return found;
 };
@@ -86,14 +89,10 @@ describe('authzgen derivation', () => {
     ]);
   });
 
-  it('honours an explicit permission name', () => {
-    const doc = spec({
-      '/widgets/{widgetId}/keys': {
-        post: op('postWidgetKeys', { 'x-authz': { permission: 'widget.issueKeys' } }),
-      },
-    });
-    const p = permissionOf(doc, 'example.widget.issueKeys');
-    expect(p.name).toBe('widget.issueKeys');
+  it('names a permission after the route and the operation', () => {
+    const doc = spec({ '/widgets/{widgetId}/keys': { post: op('postWidgetKeys') } });
+    const p = permissionOf(doc, 'example.postWidgetKeys');
+    expect(p.name).toBe('postWidgetKeys');
     expect(p.operationId).toBe('postWidgetKeys');
   });
 
@@ -103,7 +102,7 @@ describe('authzgen derivation', () => {
       '/widgets/{widgetId}': { get: op('getWidget') },
     });
     expect(permissionOf(doc, 'example.getWidgetsByRegion').scopedBy).toEqual([]);
-    expect(derive(doc).resourceTypes).toEqual(['widgets']);
+    expect(derive(doc, SERVICE).resourceTypes).toEqual(['widgets']);
   });
 
   it('counts every parameter towards the capture index, bound or not', () => {
@@ -115,38 +114,32 @@ describe('authzgen derivation', () => {
     ]);
   });
 
-  it('marks security: [] as anonymous', () => {
-    const doc = spec({ '/health': { get: op('getHealth', { security: [] }) } });
-    const p = permissionOf(doc, 'example.getHealth');
-    expect(p.anonymous).toBe(true);
-    expect(p.authenticators).toEqual(['noop']);
-  });
-
-  it('maps security schemes to authenticators', () => {
-    const doc = spec({
-      '/widgets/{widgetId}': { get: op('getWidget', { security: [{ session: [] }, { machineToken: [] }] }) },
-    });
-    expect(permissionOf(doc, 'example.getWidget').authenticators).toEqual(['cookie_session', 'jwt']);
+  it('leaves a document nothing to say about how a caller proves who they are', () => {
+    const doc = spec({ '/widgets/{widgetId}': { get: op('getWidget', { security: [] }) } });
+    expect(Object.keys(permissionOf(doc, 'example.getWidget'))).not.toContain('security');
   });
 
   describe('rejections', () => {
     const rejects = (doc: unknown, message: RegExp) => {
-      expect(() => derive(doc)).toThrow(DocumentError);
-      expect(() => derive(doc)).toThrow(message);
+      expect(() => derive(doc, SERVICE)).toThrow(DocumentError);
+      expect(() => derive(doc, SERVICE)).toThrow(message);
     };
 
-    it('requires x-authz.service at the root', () => {
-      const doc = spec({ '/widgets': { get: op('getWidgets') } });
-      delete (doc as any)['x-authz'];
-      rejects(doc, /x-authz.service/);
+    it('requires the service to be a prefix a permission id can carry', () => {
+      const doc = spec({ '/widgets': { get: op('getWidgets', { 'x-authz': { scopedBy: [] } }) } });
+      expect(() => derive(doc, 'portal.shell')).toThrow(/is not a permission prefix/);
+    });
+
+    it('writes an encoded prefix as the namespace in the model and the check', () => {
+      const doc = spec({ '/widgets': { get: op('getWidgets', { 'x-authz': { scopedBy: [] } }) } });
+      const bundle = derive(doc, 'portal-shell');
+      expect(emitModel(bundle)).toContain('export class portal_2d_shell implements Namespace {}');
+      expect((emitRules(bundle) as any[])[1].authorizer.config.payload).toContain('"namespace":"portal_2d_shell"');
+      expect(bundle.permissions[0]!.id).toBe('portal-shell.getWidgets');
     });
 
     it('requires a summary for the catalog', () => {
       rejects(spec({ '/widgets': { get: { operationId: 'getWidgets', security: [] } } }), /summary is required/);
-    });
-
-    it('requires security to be explicit on every operation', () => {
-      rejects(spec({ '/widgets': { get: { operationId: 'getWidgets', summary: 'x' } } }), /security must be declared/);
     });
 
     it('rejects unknown x-authz keys', () => {
@@ -201,7 +194,7 @@ describe('authzgen derivation', () => {
 
     it('rejects an unknown x-authz key at the root', () => {
       const doc = { ...spec({ '/health': { get: op('getHealth', { security: [] }) } }) } as any;
-      doc['x-authz'] = { service: 'example', scopes: [] };
+      doc['x-authz'] = { scopes: [] };
       rejects(doc, /the document root: unknown x-authz key "scopes"/);
     });
 
@@ -217,13 +210,12 @@ describe('authzgen derivation', () => {
     it.each([
       ['it names the row type', { 'x-authz': { scopedBy: ['widgets'] } }],
       ['it declares the rows unscoped', { 'x-authz': { scopedBy: [] } }],
-      ['it is anonymous', { security: [] }],
     ])('accepts a collection GET when %s', (_label, extra) => {
       const doc = spec({
         '/widgets': { get: op('getWidgets', { ...listOf({ type: 'object' }), ...extra }) },
         '/widgets/{widgetId}': { get: op('getWidget') },
       });
-      expect(() => derive(doc)).not.toThrow();
+      expect(() => derive(doc, SERVICE)).not.toThrow();
     });
 
     it('does not ask a collection GET under a bound resource to declare anything', () => {
@@ -238,7 +230,7 @@ describe('authzgen derivation', () => {
     it('rejects duplicate permission ids', () => {
       const doc = spec({
         '/a': { get: op('same') },
-        '/b': { get: op('other', { 'x-authz': { permission: 'same' } }) },
+        '/b': { get: op('same') },
       });
       rejects(doc, /duplicate permission id/);
     });
@@ -260,7 +252,7 @@ describe('authzgen rule emission', () => {
     for (const p of bundle.permissions) for (const a of p.scopedBy) a.resourceName = 'Widget';
     return bundle;
   };
-  const rules = emitRules(named(derive(doc))) as any[];
+  const rules = emitRules(named(derive(doc, SERVICE))) as any[];
   const byIdIn = (list: any[], id: string) => list.find((r) => r.id === id);
   const byId = (id: string) => byIdIn(rules, id);
 
@@ -280,15 +272,39 @@ describe('authzgen rule emission', () => {
   });
 
   it('answers at the root of a host the deployment named but gave no mount path', () => {
-    const served = emitRules(derive(doc), { host: 'api.example.test' }) as any[];
+    const served = emitRules(derive(doc, SERVICE), { hosts: ['api.example.test'] }) as any[];
     for (const rule of served) expect(rule.match.url).not.toContain('{');
     expect(byIdIn(served, 'example.getWidgets').match.url).toBe('<http|https>://api.example.test/api/widgets<$>');
   });
 
-  it('mounts under the prefix a deployment gives it', () => {
-    const served = emitRules(derive(doc), { host: 'portal.example.test', path: '/widgets/' }) as any[];
+  it('mounts under the prefix a route rewrites away', () => {
+    const served = emitRules(derive(doc, SERVICE), {
+      hosts: ['portal.example.test'],
+      rewrite: { from: '/widgets/', to: '' },
+    }) as any[];
     expect(byIdIn(served, 'example.getWidgets').match.url).toBe(
       '<http|https>://portal.example.test/widgets/api/widgets<$>',
+    );
+  });
+
+  it('maps a rewrite onto the base path back to the path clients send', () => {
+    const served = emitRules(derive(doc, SERVICE), {
+      hosts: ['portal.example.test'],
+      rewrite: { from: '/w', to: '/api' },
+    }) as any[];
+    expect(byIdIn(served, 'example.getWidgets').match.url).toBe('<http|https>://portal.example.test/w/widgets<$>');
+  });
+
+  it('refuses a rewrite that never reaches the base path', () => {
+    expect(() =>
+      emitRules(derive(doc, SERVICE), { hosts: ['portal.example.test'], rewrite: { from: '/w', to: '/v2' } }),
+    ).toThrow(/rewrites \/w to \/v2, which never reaches \/api/);
+  });
+
+  it('answers on every host a route names, wildcards one label deep', () => {
+    const served = emitRules(derive(doc, SERVICE), { hosts: ['b.example.test', '*.example.org'] }) as any[];
+    expect(byIdIn(served, 'example.getWidgets').match.url).toBe(
+      '<http|https>://<[^.]+\\.example\\.org|b\\.example\\.test>/api/widgets<$>',
     );
   });
 
@@ -297,12 +313,21 @@ describe('authzgen rule emission', () => {
       openapi: '3.0.1',
       info: { title: 'Example App' },
       servers: [{ url: '/' }],
-      'x-authz': { service: 'exampleApp' },
       components: { securitySchemes: schemes },
       paths: { '/': { get: op('viewApp', { 'x-authz': { scopedBy: [] } }) } },
     };
-    const served = emitRules(derive(app), { host: 'app.example.test' }) as any[];
-    expect(byIdIn(served, 'exampleApp.viewApp').match.url).toBe('<http|https>://app.example.test<(?:/.*)?>');
+    const served = emitRules(derive(app, 'exampleApp'), { hosts: ['app.example.test'] }) as any[];
+    expect(byIdIn(served, 'exampleApp.viewApp').match.url).toBe(
+      '<http|https>://app.example.test<(?!/\\.authz/openapi(?:/|$))(?:/.*)?>',
+    );
+
+    const beside = emitRules(derive(app, 'exampleApp'), {
+      hosts: ['app.example.test'],
+      exclude: ['/api/', '/reports'],
+    }) as any[];
+    expect(byIdIn(beside, 'exampleApp.viewApp').match.url).toBe(
+      '<http|https>://app.example.test<(?!/\\.authz/openapi(?:/|$)|/api(?:/|$)|/reports(?:/|$))(?:/.*)?>',
+    );
   });
 
   it('addresses the service namespace with a resource-name-qualified object', () => {
@@ -329,9 +354,17 @@ describe('authzgen rule emission', () => {
     expect(byId('example.getWidgets').authorizer.config.payload).toContain('"object":"__self__"');
   });
 
-  it('leaves anonymous operations unauthorized', () => {
-    expect(byId('example.getHealth').authorizer).toEqual({ handler: 'allow' });
-    expect(byId('example.getHealth').authenticators).toEqual([{ handler: 'noop' }]);
+  it('checks every operation, so what is open is a grant rather than a rule', () => {
+    expect(byId('example.getHealth').authorizer.handler).toBe('remote_json');
+  });
+
+  it('takes its authenticators from the deployment', () => {
+    expect(byId('example.getWidgets').authenticators).toEqual([
+      { handler: 'cookie_session' },
+      { handler: 'jwt' },
+    ]);
+    const chosen = emitRules(named(derive(doc, SERVICE)), { authenticators: ['mtls'] }) as any[];
+    expect(chosen.find((r) => r.id === 'example.getWidgets').authenticators).toEqual([{ handler: 'mtls' }]);
   });
 
   it('carries a noop mutator on every rule', () => {
@@ -345,7 +378,7 @@ describe('authzgen model emission', () => {
       '/widgets': { get: op('getWidgets') },
       '/widgets/{widgetId}/parts': { get: op('getWidgetParts'), post: op('addWidgetPart') },
     });
-    const model = emitModel(derive(doc));
+    const model = emitModel(derive(doc, SERVICE));
     expect(model).toContain('export class example implements Namespace {}');
     expect(model).toContain('export class Role implements Namespace {');
     expect(model).not.toContain('getWidgetParts');

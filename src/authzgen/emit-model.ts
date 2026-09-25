@@ -1,3 +1,4 @@
+import { ketoNamespace } from './keto-name';
 import { ServiceBundle } from './types';
 
 /**
@@ -14,7 +15,7 @@ import { ServiceBundle } from './types';
  * `<type>/__all__` for the type-wide object, `__self__` for the singleton.
  */
 
-/** Declared once platform-wide; every staged model repeats them byte-identically. */
+/** Declared once per deployment; every staged model repeats them byte-identically. */
 export const CANONICAL_STUBS = `import { Namespace } from "@ory/keto-namespace-types"
 
 export class User implements Namespace {}
@@ -36,7 +37,7 @@ export function emitNamespace(bundle: ServiceBundle): string {
   return (
     `// ${bundle.title}: objects are "<type>/<id>", "<type>/__all__" for the\n` +
     `// type-wide object, "__self__" for the service singleton.\n` +
-    `export class ${bundle.service} implements Namespace {}\n`
+    `export class ${ketoNamespace(bundle.service)} implements Namespace {}\n`
   );
 }
 

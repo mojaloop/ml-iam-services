@@ -47,6 +47,47 @@ export type PermissionIndex = Map<string, CatalogPermission>;
 export const indexCatalogs = (catalogs: ServiceCatalog[]): PermissionIndex =>
   new Map(catalogs.flatMap((c) => c.permissions.map((p) => [p.id, p])));
 
+export interface ReadyRoles {
+  /** The roles every one of whose services is composed, with their assignments and exclusions. */
+  file: RolesFile;
+  /** What waits, and for which services. */
+  pending: string[];
+}
+
+/**
+ * Services arrive as their routes do, so a role can name one the deployment
+ * has not composed yet. Such a role waits whole, assignments included: half
+ * of it would be different access, and possibly a different shape, since
+ * which resource names a role leaves open comes from its permissions. An
+ * exclusion naming a waiting service waits too; no role holding its missing
+ * side is live to break it.
+ */
+export function readyRoles(file: RolesFile, catalogs: ServiceCatalog[]): ReadyRoles {
+  const composed = new Set(catalogs.map((c) => c.service));
+  const absent = (ids: string[]): string[] =>
+    [...new Set(ids.map((id) => id.split('.')[0]!).filter((service) => !composed.has(service)))].sort();
+
+  const pending: string[] = [];
+  const roles: Record<string, RoleDocument> = {};
+  for (const [name, role] of Object.entries(file.roles ?? {})) {
+    const missing = absent((role.grants ?? []).map((g) => g.permission));
+    if (missing.length > 0) pending.push(`role ${name} waits for ${missing.join(', ')}`);
+    else roles[name] = role;
+  }
+
+  const exclusions = (file.exclusions ?? []).filter((rule) => {
+    const missing = absent([...(rule.a ?? []), ...(rule.b ?? [])]);
+    if (missing.length > 0) pending.push(`exclusion ${rule.name} waits for ${missing.join(', ')}`);
+    return missing.length === 0;
+  });
+
+  const assignments = (file.assignments ?? []).filter(
+    (a) => file.roles?.[a.role] === undefined || roles[a.role] !== undefined,
+  );
+
+  return { file: { roles, assignments, exclusions }, pending };
+}
+
 /**
  * The resource names a grant's permission is scoped by, with the resources
  * each resolves to: the grant's own naming, or undefined for the assignment

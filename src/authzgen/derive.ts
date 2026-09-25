@@ -1,38 +1,34 @@
 import { DocumentError, readDocument } from '@mojaloop/authz/document';
 
+import { PREFIX } from './keto-name';
 import { Permission, ScopedType, ServiceBundle } from './types';
 
 /**
  * Derivation: an annotated OpenAPI document in, the authorization model of
- * that service out. The rules are fixed platform-wide, so two services with
- * the same shape always produce the same authorization structure.
+ * that service out. Derivation is fixed, so two services with the same shape
+ * always produce the same authorization structure.
  *
  * What `x-authz` means is read by the package a service's own guard reads it
  * with, so the deploy-time conclusion and the runtime one cannot differ. What
  * is added here is what only the gateway needs: which capture group carries a
- * bound id, and which authenticator each security scheme maps to.
+ * bound id.
  *
- *   permission id   <service>.<x-authz.permission ?? operationId>
+ *   permission id   <service>.<operationId>, so operationId is part of the
+ *                   authorization contract and renaming one is a breaking change
  *   scoped by       x-authz.scopedBy ?? [the type of the outermost parameter]
  *   resource type   the literal segment preceding a path parameter
  *   bound type      a scoping type the path binds an id for; it is checked as
  *                   <type>/<id>, and every scoping type is handed to the
  *                   service to narrow by, whether bound or not
  *   singleton       an operation with no bound type, checked against __self__
- *   anonymous       native `security: []`
- *   authenticators  the security schemes, mapped by platform convention
+ *
+ * How a caller proves who they are is the deployment's business. A document's
+ * own `security` is documentation, and nothing here reads it: an operation
+ * open to everyone is one the `$everyone` role grants.
  */
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
 type Doc = any;
-
-/** Platform convention: an OpenAPI security scheme maps to one authenticator. */
-export const AUTHENTICATOR_BY_SCHEME: Record<string, string> = {
-  'apiKey:cookie': 'cookie_session',
-  'http:bearer': 'jwt',
-  'oauth2:': 'jwt',
-  'openIdConnect:': 'jwt',
-};
 
 /**
  * Path parameters in path order. Capture-group index 0 is the scheme group,
@@ -45,27 +41,26 @@ const pathParams = (path: string): string[] =>
     .filter(Boolean)
     .flatMap((segment) => (segment.startsWith('{') && segment.endsWith('}') ? [segment.slice(1, -1)] : []));
 
-const authenticatorsFor = (security: Doc, schemes: Doc, where: string): string[] => {
-  const handlers = new Set<string>();
-  for (const requirement of security) {
-    for (const scheme of Object.keys(requirement)) {
-      const declared = schemes?.[scheme];
-      if (!declared) throw new DocumentError(`${where}: security scheme "${scheme}" is not declared`);
-      const key = `${declared.type}:${declared.type === 'apiKey' ? declared.in : declared.scheme ?? ''}`;
-      const handler = AUTHENTICATOR_BY_SCHEME[key];
-      if (!handler) {
-        throw new DocumentError(`${where}: security scheme "${scheme}" (${key}) has no authenticator mapping`);
-      }
-      handlers.add(handler);
-    }
+/**
+ * The kinds of credential an operation accepts, read from the schemes the
+ * document declares. Which authenticator answers a kind is the gateway's
+ * business, so only the kind travels from here.
+ */
+/**
+ * @param service  the authorization namespace the route this document serves
+ *                 is annotated with
+ */
+export function derive(doc: Doc, service: string): ServiceBundle {
+  if (!PREFIX.test(service)) {
+    throw new DocumentError(
+      `service "${service}" is not a permission prefix: a letter or digit, then letters, digits, underscores or hyphens`,
+    );
   }
-  return [...handlers];
-};
 
-export function derive(doc: Doc): ServiceBundle {
   const root = doc['x-authz'] ?? {};
+  const known = new Set(['resourceTypes']);
   for (const key of Object.keys(root)) {
-    if (key !== 'service' && key !== 'resourceTypes') {
+    if (!known.has(key)) {
       throw new DocumentError(`the document root: unknown x-authz key "${key}"`);
     }
   }
@@ -76,13 +71,10 @@ export function derive(doc: Doc): ServiceBundle {
     throw new DocumentError('x-authz.resourceTypes must be an array of resource types');
   }
 
-  const { service, basePath, operations } = readDocument(doc);
-  const schemes = doc.components?.securitySchemes;
+  const { basePath, operations } = readDocument(doc);
 
   const permissions: Permission[] = operations.map((operation) => {
-    const where = `${operation.method} ${operation.template}`;
     const params = pathParams(operation.template);
-    const node = doc.paths[operation.template][operation.method.toLowerCase()];
 
     // Checks are emitted in capture order, so bound types sort by their
     // capture index and types the path does not bind follow them.
@@ -95,15 +87,13 @@ export function derive(doc: Doc): ServiceBundle {
       .sort((a, b) => (a.captureIndex ?? Infinity) - (b.captureIndex ?? Infinity));
 
     return {
-      id: operation.permission,
-      name: operation.permission.slice(service.length + 1),
+      id: `${service}.${operation.operationId}`,
+      name: operation.operationId,
       operationId: operation.operationId,
       method: operation.method,
       path: operation.template,
       summary: operation.summary,
       deprecated: operation.deprecated,
-      anonymous: operation.anonymous,
-      authenticators: operation.anonymous ? ['noop'] : authenticatorsFor(node.security, schemes, where),
       scopedBy,
     };
   });

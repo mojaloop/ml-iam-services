@@ -1,7 +1,7 @@
 import { CatalogPermission, ServiceCatalog } from '../../src/authzgen/types';
 import { materialize, materializeRole, roleObject } from '../../src/iam/materialize';
 import { provision } from '../../src/iam/provision';
-import { indexCatalogs, openResourceNames, RolesFile, validateRoles } from '../../src/iam/roles';
+import { indexCatalogs, openResourceNames, readyRoles, RolesFile, validateRoles } from '../../src/iam/roles';
 
 const NAMES: Record<string, string> = { widgets: 'Widget', reports: 'Report' };
 
@@ -20,6 +20,7 @@ const permission = (id: string, scopedBy: string[] = [], bound: string[] = []): 
 
 const catalog: ServiceCatalog = {
   service: 'example',
+  namespace: 'example',
   title: 'Example',
   basePath: '',
   resourceTypes: ['widgets', 'reports'],
@@ -34,6 +35,55 @@ const catalog: ServiceCatalog = {
 
 const index = indexCatalogs([catalog]);
 const check = (file: RolesFile) => validateRoles(file, index);
+
+describe('roles waiting for their services', () => {
+  const file: RolesFile = {
+    roles: {
+      reader: { grants: [{ permission: 'example.getRegions' }] },
+      operator: { grants: [{ permission: 'example.getWidgetCa' }, { permission: 'ledger.getPositions' }] },
+    },
+    assignments: [
+      { subject: 'alice', role: 'reader' },
+      { subject: 'bob', role: 'operator', resources: { Widget: 'w1' } },
+      { subject: 'carol', role: 'nobody' },
+    ],
+    exclusions: [
+      { name: 'regions-vs-ca', a: ['example.getRegions'], b: ['example.getWidgetCa'] },
+      { name: 'regions-vs-positions', a: ['example.getRegions'], b: ['ledger.getPositions'] },
+    ],
+  };
+
+  it('holds back a role, its assignments and exclusions until every service it names is composed', () => {
+    const ready = readyRoles(file, [catalog]);
+    expect(Object.keys(ready.file.roles)).toEqual(['reader']);
+    expect(ready.file.assignments?.map((a) => a.subject)).toEqual(['alice', 'carol']);
+    expect(ready.file.exclusions?.map((e) => e.name)).toEqual(['regions-vs-ca']);
+    expect(ready.pending).toEqual([
+      'role operator waits for ledger',
+      'exclusion regions-vs-positions waits for ledger',
+    ]);
+    expect(validateRoles(ready.file, index)).toEqual(['assignment for carol: unknown role nobody']);
+  });
+
+  it('lets them go live once the service arrives', () => {
+    const ledger: ServiceCatalog = {
+      ...catalog,
+      service: 'ledger',
+      namespace: 'ledger',
+      permissions: [permission('ledger.getPositions')],
+    };
+    const ready = readyRoles(file, [catalog, ledger]);
+    expect(Object.keys(ready.file.roles)).toEqual(['reader', 'operator']);
+    expect(ready.pending).toEqual([]);
+  });
+
+  it('still refuses an operation a composed service does not have', () => {
+    const typo: RolesFile = { roles: { r: { grants: [{ permission: 'example.getRegionz' }] } } };
+    const ready = readyRoles(typo, [catalog]);
+    expect(ready.pending).toEqual([]);
+    expect(validateRoles(ready.file, index)).toEqual(['r: unknown permission example.getRegionz']);
+  });
+});
 
 describe('role validation', () => {
   it('accepts grants that name resources or leave the name for the assignment', () => {

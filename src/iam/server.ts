@@ -1,5 +1,6 @@
 import { readFileSync } from 'node:fs';
 import { createServer, IncomingMessage, ServerResponse } from 'node:http';
+import { createServer as createHttpsServer } from 'node:https';
 import { join } from 'node:path';
 
 import type { Context } from 'openapi-backend';
@@ -7,15 +8,17 @@ import { OpenAPIBackend } from 'openapi-backend';
 import { parse as parseYaml } from 'yaml';
 
 import { accessRules, Migrations, ResourceNames } from '../authzgen/compose';
+import { ketoNamespace } from '../authzgen/keto-name';
 import { ServiceCatalog } from '../authzgen/types';
 import { Operator } from '../operator/server';
+import { review, WEBHOOK_PATH } from '../operator/webhook';
 import { config } from './config';
 import { KetoWriter } from './keto';
 import { ROLE_NAMESPACE } from './materialize';
 import { ProvisionRequest } from './provision';
 import { Assignment, Provisioner } from './provisioner';
 import { Applied, applyRoles, report } from './reconcile';
-import { indexCatalogs, openResourceNames, RolesFile, validateRoles } from './roles';
+import { indexCatalogs, openResourceNames, readyRoles, RolesFile, validateRoles } from './roles';
 import { startSourceSync } from './source-sync';
 
 /** What a deployment has to offer: the permissions services advertise, and the roles composed from them. */
@@ -24,8 +27,10 @@ export interface Offered {
   roles: RolesFile;
   /** The deployment's vocabulary, served verbatim to every consumer. */
   names?: ResourceNames;
-  /** What this process applied when it started, absent until it has. */
+  /** What this process last applied, absent until it has. */
   applied?: Applied;
+  /** Roles and exclusions waiting for a service no route has brought yet. */
+  pending?: string[];
   /** The composed rules, model and derivation, for the IAM's own callers. */
   composed?: { model: string; derivation: string; rules: Record<string, string> };
 }
@@ -128,6 +133,7 @@ export async function buildHandler(
         roles: Object.keys(offered.roles.roles),
         exclusions: offered.roles.exclusions ?? [],
         applied: offered.applied ?? null,
+        pending: offered.pending ?? [],
       },
     }),
     getRoles: () => ({
@@ -199,6 +205,14 @@ export async function buildHandler(
   };
 }
 
+/** Every Keto namespace applying these roles writes into. */
+const namespacesOf = (file: RolesFile): string[] => [
+  ROLE_NAMESPACE,
+  ...new Set(
+    Object.values(file.roles).flatMap((role) => role.grants.map((g) => ketoNamespace(g.permission.split('.')[0]!))),
+  ),
+];
+
 export async function waitForModel(keto: KetoWriter, namespace: string): Promise<void> {
   for (;;) {
     try {
@@ -235,14 +249,45 @@ export interface StartOptions {
   adminRole?: string;
   kratosAdminUrl?: string;
   kratosPublicUrl?: string;
-  /** The namespace whose AuthzDocuments this reconciles, when it runs in one. */
+  /** The namespace the composition is published into, when it runs in one. */
   namespace?: string;
-  /** A registry file the chart mounted, composed alongside those documents. */
-  registry?: string;
   /** The deployment's names for one thing across services. */
   resourceNames?: string;
   /** The ConfigMap the composed rules and catalog are published as. */
   publishAs?: string;
+  /** A directory holding tls.crt and tls.key, to answer AuthzDocument admission over HTTPS. */
+  webhookCertDir?: string;
+}
+
+const WEBHOOK_PORT = 9443;
+/** cert-manager renews the certificate in place; the server picks it up without a restart. */
+const CERT_RELOAD_MS = 60_000;
+
+/**
+ * Admission answers from the moment the process starts, before it waits on
+ * Keto or the roles: a document applied while the IAM comes up must still be
+ * checked, and the webhook refuses what it cannot reach.
+ */
+function startWebhook(dir: string): void {
+  const read = () => ({ cert: readFileSync(join(dir, 'tls.crt')), key: readFileSync(join(dir, 'tls.key')) });
+  const server = createHttpsServer(read(), (req, res) => {
+    if (req.method !== 'POST' || req.url?.split('?')[0] !== WEBHOOK_PATH) {
+      send(res, 404, { error: 'Not found' });
+      return;
+    }
+    readBody(req)
+      .then((raw) => review(JSON.parse(raw)))
+      .then((answer) => send(res, 200, answer))
+      .catch((error) => send(res, 400, { error: String(error) }));
+  });
+  setInterval(() => {
+    try {
+      server.setSecureContext(read());
+    } catch (error) {
+      console.error(JSON.stringify({ event: 'webhook-cert-reload-failed', error: String(error) }));
+    }
+  }, CERT_RELOAD_MS).unref();
+  server.listen(WEBHOOK_PORT, () => console.log(`AuthzDocument admission listening on port ${WEBHOOK_PORT}`));
 }
 
 /** Reads a composed catalog: every service of a deployment, per file. */
@@ -255,6 +300,7 @@ export const readCatalogs = (paths: string[]): ServiceCatalog[] =>
  * not answer a request until it has.
  */
 export async function start(options: StartOptions): Promise<void> {
+  if (options.webhookCertDir !== undefined) startWebhook(options.webhookCertDir);
   const read = <T>(path: string): T => JSON.parse(readFileSync(path, 'utf8')) as T;
   const roles = read<RolesFile>(options.roles);
 
@@ -281,7 +327,7 @@ export async function start(options: StartOptions): Promise<void> {
     operator = new Operator({
       namespace: options.namespace,
       names,
-      ...(options.registry !== undefined ? { registry: options.registry } : {}),
+      ...(options.migrations !== undefined ? { migrations: read<Migrations>(options.migrations) } : {}),
       ...(options.publishAs !== undefined ? { publishAs: options.publishAs } : {}),
       onAccepted: (result) => {
         if (result.composition !== undefined) {
@@ -306,31 +352,37 @@ export async function start(options: StartOptions): Promise<void> {
     offered.catalog = readCatalogs(options.catalog ?? []);
   }
 
-  // The roles must validate against the catalog before anything is applied or
-  // served: staying unready leaves the previous pod serving the previous
-  // policy. Documents arrive as cluster resources, so a catalog can complete
-  // on a later composition — readiness holds until one covers the roles. A
-  // catalog read from files is the whole of it, so there a mismatch is fatal.
+  // The live roles must validate against the catalog before anything is
+  // applied or served: staying unready leaves the previous pod serving the
+  // previous policy. A role naming a service no route has brought yet waits,
+  // and goes live with the composition that brings it. A catalog read from
+  // files is the whole of it, so there a waiting role is a mismatch, and fatal.
   awaitComposition();
-  let index = indexCatalogs(offered.catalog);
-  let problems = validateRoles(roles, index);
-  while (problems.length > 0) {
+  const check = () => {
+    const ready = readyRoles(roles, offered.catalog);
+    const index = indexCatalogs(offered.catalog);
+    const problems = [...validateRoles(ready.file, index), ...(operator === undefined ? ready.pending : [])];
+    return { ready, index, problems };
+  };
+  let current = check();
+  while (current.problems.length > 0) {
     if (operator === undefined) {
-      console.error(`${options.roles} does not match the catalog:\n  ${problems.join('\n  ')}`);
+      console.error(`${options.roles} does not match the catalog:\n  ${current.problems.join('\n  ')}`);
       process.exit(1);
     }
     console.error(
-      `${options.roles} does not match the catalog, holding readiness for the documents that declare it:\n  ${problems.join('\n  ')}`,
+      `${options.roles} does not match the catalog, holding readiness for the documents that declare it:\n  ${current.problems.join('\n  ')}`,
     );
     await recomposed;
     awaitComposition();
-    index = indexCatalogs(offered.catalog);
-    problems = validateRoles(roles, index);
+    current = check();
   }
+  offered.pending = current.ready.pending;
+  for (const line of current.ready.pending) console.log(`WAITING  ${line}`);
 
   const keto = new KetoWriter(config.ketoWriteUrl, config.ketoReadUrl);
   await waitFor(`${config.ketoReadUrl}/health/ready`, 'keto');
-  await waitForModel(keto, ROLE_NAMESPACE);
+  for (const namespace of namespacesOf(current.ready.file)) await waitForModel(keto, namespace);
   if (options.adminEmail !== undefined && options.kratosAdminUrl !== undefined) {
     if (options.adminRole === undefined) {
       throw new Error('--admin-role is required with --admin-email: the role is deployment configuration');
@@ -338,7 +390,7 @@ export async function start(options: StartOptions): Promise<void> {
     await waitFor(`${options.kratosAdminUrl}/health/ready`, 'kratos');
   }
 
-  const applied = await applyRoles(keto, roles, index, {
+  const applied = await applyRoles(keto, current.ready.file, current.index, {
     ...(options.migrations !== undefined ? { migrations: read<Migrations>(options.migrations) } : {}),
     ...(options.adminEmail !== undefined && options.adminRole !== undefined && options.kratosAdminUrl !== undefined
       ? {
@@ -360,9 +412,40 @@ export async function start(options: StartOptions): Promise<void> {
     intervalMs: config.sourceSyncSeconds * 1000,
   });
 
-  const provisioner = new Provisioner(keto, roles, index, names);
+  const provisioner = new Provisioner(keto, current.ready.file, current.index, names);
   offered.applied = applied;
   const handler = await buildHandler(provisioner, offered);
+
+  // Every composition that changes which roles are live, or what their
+  // permissions are, applies them again, the way a restarted pod would.
+  if (operator !== undefined) {
+    const signature = (c: ReturnType<typeof check>) =>
+      JSON.stringify([Object.keys(c.ready.file.roles).sort(), offered.catalog]);
+    let appliedAs = signature(current);
+    void (async () => {
+      for (;;) {
+        await recomposed;
+        awaitComposition();
+        const next = check();
+        if (next.problems.length > 0) {
+          console.error(`${options.roles} does not match the new catalog, keeping the roles applied:\n  ${next.problems.join('\n  ')}`);
+          continue;
+        }
+        if (signature(next) === appliedAs) continue;
+        for (const namespace of namespacesOf(next.ready.file)) await waitForModel(keto, namespace);
+        const reapplied = await applyRoles(keto, next.ready.file, next.index);
+        for (const line of report(reapplied)) console.log(line);
+        for (const line of next.ready.pending) console.log(`WAITING  ${line}`);
+        provisioner.use(next.ready.file, next.index);
+        offered.applied = reapplied;
+        offered.pending = next.ready.pending;
+        appliedAs = signature(next);
+      }
+    })().catch((error) => {
+      console.error('Applying the roles to a new composition failed:', error);
+      process.exit(1);
+    });
+  }
 
   const server = createServer((req, res) => {
     handler(req, res).catch((error) => {

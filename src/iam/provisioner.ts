@@ -37,10 +37,16 @@ export const parseInstance = (object: string): Assignment => {
 export class Provisioner {
   constructor(
     private readonly keto: KetoWriter,
-    private readonly roles: RolesFile,
-    private readonly index: PermissionIndex,
+    private roles: RolesFile,
+    private index: PermissionIndex,
     private readonly names: ResourceNames = {},
   ) {}
+
+  /** The roles and catalog that are live now, as compositions add services. */
+  use(roles: RolesFile, index: PermissionIndex): void {
+    this.roles = roles;
+    this.index = index;
+  }
 
   /** The declared vocabulary is the registry's key space, so a name outside it is refused. */
   private declared(resourceName: string): { problem?: string } {

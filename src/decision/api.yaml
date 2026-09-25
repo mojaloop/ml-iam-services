@@ -10,9 +10,6 @@ info:
     Read-only Keto access, no gateway route of its own, and the single audit
     point: one record per decision either way.
 
-x-authz:
-  service: iamDecision
-
 servers:
   - url: /
 

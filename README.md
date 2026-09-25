@@ -12,8 +12,9 @@ sessions, **Hydra** issues machine tokens. What sits between them is here.
 **`authzgen`** turns a service's annotated OpenAPI document into its
 authorization artifacts. One operation is one permission, and everything else
 is derived from the document's shape, so a service ships an API description and
-no rules file, no permission model and no roles. Run per service at deploy
-time.
+no rules file, no permission model and no roles. The operator inside
+`provisioning` runs it for every backend an HTTPRoute keys, and publishes the
+composition.
 
 **`decide`** is what Oathkeeper asks on every request. It takes the rule's
 rendered payload, composes the Keto checks behind it, and answers allow or deny
@@ -42,6 +43,7 @@ the decision path.
 
 ```
 src/authzgen/     OpenAPI document -> rules, model, catalog, derivation table
+src/operator/     routes -> documents -> one composition, published for the gateway and Keto
 src/decision/     the endpoint Oathkeeper asks, and how a scope is computed
 src/iam/          role documents, materialization, reconciliation, provisioning
 packages/authz/   the X-Scope contract, published for services to install
@@ -59,31 +61,25 @@ toolchain.
 npm install
 npm run build
 
-# generate a service's artifacts from its API document
-npm start authzgen -- --spec ./openapi.yaml --out ./out --host api.example.test --path ''
-
 # run the endpoint the gateway asks
 npm start decide
 
-# apply the deployment's roles, then serve the IAM
-npm start provisioning -- --roles ./default-roles.json --catalog ./out/catalog.json
+# compose the cluster's routes, publish the result, apply the deployment's roles, then serve the IAM
+npm start provisioning -- --roles ./default-roles.json --namespace iam --publish-as authz-composed
 
 # ...and create the first administrator while applying them
-npm start provisioning -- --roles ./default-roles.json --catalog ./out/catalog.json \
+npm start provisioning -- --roles ./default-roles.json --namespace iam --publish-as authz-composed \
   --admin-email admin@example.test --admin-password "$PASSWORD"
-
-# compose every service's catalog into the deployment's one
-npm start compose -- --registry ./registry.json --out ./out
 ```
 
 ## What authzgen emits
 
-| file | consumer |
+| artifact | consumer |
 |---|---|
-| `oathkeeper-rules.yml` | the gateway |
-| `keto-namespaces.ts` | Keto, concatenated with every other service's |
-| `catalog.json` | the IAM, for the role UI and to validate role documents |
-| `derivation.txt` | humans: one line per operation, reviewed and diffed |
+| access rules | the gateway, published as `access-rules.yml` |
+| Keto model | Keto, one `keto-namespaces.ts` for every service |
+| catalog | the IAM, for the role UI and to validate role documents |
+| derivation table | humans: one line per operation, reviewed and diffed |
 
 The model is two shared classes and one empty class per service, because Keto
 enforces namespaces but not relations and resolves role indirection with no

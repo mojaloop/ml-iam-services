@@ -1,3 +1,4 @@
+import { ketoNamespace } from '../authzgen/keto-name';
 import { ALL, grantResources, openResourceNames, PermissionIndex, ResourceSet, RoleDocument, RolesFile } from './roles';
 
 /**
@@ -55,7 +56,7 @@ export function materializeRole(
 
   for (const grant of role.grants) {
     const permission = index.get(grant.permission)!;
-    const [namespace] = grant.permission.split('.');
+    const namespace = ketoNamespace(grant.permission.split('.')[0]!);
     const named = grantResources(grant, permission);
 
     const objectsOf = (type: string): string[] => {
