@@ -234,6 +234,37 @@ describe('authzgen derivation', () => {
       });
       rejects(doc, /duplicate permission id/);
     });
+
+    it('rejects an internal flag that is not a boolean', () => {
+      const doc = spec({ '/health': { get: op('getHealth', { 'x-authz': { internal: 'yes' } }) } });
+      rejects(doc, /x-authz.internal must be true or false/);
+    });
+
+    it('rejects scopedBy on an internal operation', () => {
+      const doc = spec({ '/health': { get: op('getHealth', { 'x-authz': { internal: true, scopedBy: [] } }) } });
+      rejects(doc, /an internal operation is no permission, so it has no scopedBy/);
+    });
+  });
+
+  describe('internal operations', () => {
+    const doc = spec({
+      '/widgets/{widgetId}': { get: op('getWidget') },
+      '/health': { get: op('getHealth', { 'x-authz': { internal: true } }) },
+      '/metrics': {
+        get: op('getMetrics', {
+          'x-authz': { internal: true },
+          responses: { 200: { content: { 'application/json': { schema: { type: 'array' } } } } },
+        }),
+      },
+    });
+
+    it('derives no permission for an internal operation, even a list', () => {
+      expect(derive(doc, SERVICE).permissions.map((p) => p.id)).toEqual(['example.getWidget']);
+    });
+
+    it('keeps the paths of internal operations on the bundle', () => {
+      expect(derive(doc, SERVICE).internalPaths).toEqual(['/health', '/metrics']);
+    });
   });
 });
 
@@ -328,6 +359,35 @@ describe('authzgen rule emission', () => {
     expect(byIdIn(beside, 'exampleApp.viewApp').match.url).toBe(
       '<http|https>://app.example.test<(?!/\\.authz/openapi(?:/|$)|/api(?:/|$)|/reports(?:/|$))(?:/.*)?>',
     );
+  });
+
+  it('emits no rule for an internal operation, and keeps the other rules off its path', () => {
+    const probed = spec({
+      '/widgets/{widgetId}': { get: op('getWidget') },
+      '/widgets/health': { get: op('getWidgetsHealth', { 'x-authz': { internal: true } }) },
+    });
+    const served = emitRules(named(derive(probed, SERVICE)), { hosts: ['api.example.test'] }) as any[];
+    expect(served.map((rule) => rule.id)).toEqual(['example.preflight', 'example.getWidget']);
+    expect(byIdIn(served, 'example.getWidget').match.url).toBe(
+      '<http|https>://api.example.test/api/widgets/<?!health><(?<widgetId>[^/]+)><$>',
+    );
+  });
+
+  it('takes internal paths out of the mount an operation at the root owns', () => {
+    const app = {
+      openapi: '3.1.0',
+      info: { title: 'Example App' },
+      servers: [{ url: '/' }],
+      paths: {
+        '/': { get: op('viewApp', { 'x-authz': { scopedBy: [] } }) },
+        '/healthz': { get: op('getHealth', { 'x-authz': { internal: true } }) },
+        '/probes/{probe}': { get: op('getProbe', { 'x-authz': { internal: true } }) },
+      },
+    };
+    const served = emitRules(derive(app, 'exampleApp'), { hosts: ['app.example.test'] }) as any[];
+    const guard = '(?!/\\.authz/openapi(?:/|$)|/healthz(?:/|$)|/probes/[^/]+(?:/|$))';
+    expect(byIdIn(served, 'exampleApp.viewApp').match.url).toBe(`<http|https>://app.example.test<${guard}(?:/.*)?>`);
+    expect(byIdIn(served, 'exampleApp.preflight').match.url).toBe(`<http|https>://app.example.test<${guard}(?:/.*)?>`);
   });
 
   it('addresses the service namespace with a resource-name-qualified object', () => {

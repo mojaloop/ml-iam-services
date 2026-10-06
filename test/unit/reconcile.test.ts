@@ -165,8 +165,9 @@ describe('reconciling what the routes key', () => {
     );
     expect(result.held).toEqual(['alpha']);
     expect(result.problems).toHaveLength(1);
-    expect(result.problems[0]).toMatch(
-      /^alpha is keyed on acme\/acme-exporter and alpha\/alpha-api; a prefix belongs to one Service/,
+    expect(result.problems[0]).toBe(
+      'HTTPRoute/alpha/api → alpha/alpha-api, HTTPRoute/alpha/api → acme/acme-exporter: ' +
+        'alpha is keyed on acme/acme-exporter and alpha/alpha-api; a prefix belongs to one Service',
     );
     expect(result.composition?.catalog.map((c) => c.service)).toEqual(['beta']);
   });
@@ -207,7 +208,8 @@ describe('reconciling what the routes key', () => {
     );
     expect(result.held).toEqual(['alpha']);
     expect(result.problems).toEqual([
-      'alpha is read from AuthzDocument/alpha/other and http://alpha/alpha-api/.authz/openapi; a prefix has one document',
+      'HTTPRoute/alpha/api → alpha/alpha-api: ' +
+        'alpha is read from AuthzDocument/alpha/other and http://alpha/alpha-api/.authz/openapi; a prefix has one document',
     ]);
   });
 
@@ -223,7 +225,9 @@ describe('reconciling what the routes key', () => {
       widgets,
     );
     expect(result.held).toEqual(['alpha']);
-    expect(result.problems).toEqual(['alpha is reached through different paths on a.test and b.test']);
+    expect(result.problems).toEqual([
+      'HTTPRoute/alpha/api → alpha/alpha-api: alpha is reached through different paths on a.test and b.test',
+    ]);
   });
 
   it('composes a prefix every host of which is sent the same paths', () => {
@@ -251,7 +255,9 @@ describe('reconciling what the routes key', () => {
       widgets,
     );
     expect(result.held).toEqual(['alpha']);
-    expect(result.problems).toEqual(['alpha is reached through different rewrites (/a→, /b→)']);
+    expect(result.problems).toEqual([
+      'HTTPRoute/alpha/api → alpha/alpha-api: alpha is reached through different rewrites (/a→, /b→)',
+    ]);
   });
 
   it('publishes nothing when two prefixes answer the same request', () => {

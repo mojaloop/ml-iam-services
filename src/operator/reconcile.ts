@@ -59,18 +59,15 @@ const rewriteKey = (rewrite?: Rewrite): string => (rewrite === undefined ? '' : 
 /** Composes one prefix, or says why it cannot. */
 function composeOne(entries: Declared[], names: ResourceNames): { service?: ComposedService; problems: string[] } {
   const value = entries[0]!.service;
+  const origins = [...new Set(entries.map((e) => e.origin))].join(', ');
   const sources = [...new Set(entries.map((e) => e.backend))].sort();
   if (sources.length > 1) {
-    return {
-      problems: [
-        `${value} is keyed on ${sources.join(' and ')}; a prefix belongs to one Service (${entries.map((e) => e.origin).join(', ')})`,
-      ],
-    };
+    return { problems: [`${origins}: ${value} is keyed on ${sources.join(' and ')}; a prefix belongs to one Service`] };
   }
 
   const documents = [...new Set(entries.map((e) => e.source))].sort();
   if (documents.length > 1) {
-    return { problems: [`${value} is read from ${documents.join(' and ')}; a prefix has one document`] };
+    return { problems: [`${origins}: ${value} is read from ${documents.join(' and ')}; a prefix has one document`] };
   }
 
   const byHosts = new Map<string, Set<string>>();
@@ -83,7 +80,7 @@ function composeOne(entries: Declared[], names: ResourceNames): { service?: Comp
   const shapes = new Set([...byHosts.values()].map((mounts) => [...mounts].sort().join('|')));
   if (shapes.size > 1) {
     return {
-      problems: [`${value} is reached through different paths on ${[...byHosts.keys()].sort().join(' and ')}`],
+      problems: [`${origins}: ${value} is reached through different paths on ${[...byHosts.keys()].sort().join(' and ')}`],
     };
   }
 
@@ -96,7 +93,7 @@ function composeOne(entries: Declared[], names: ResourceNames): { service?: Comp
   const rewrites = [...new Set(reached.map((r) => rewriteKey(r.rewrite)))];
   if (rewrites.length > 1) {
     return {
-      problems: [`${value} is reached through different rewrites (${rewrites.map((r) => r || 'none').join(', ')})`],
+      problems: [`${origins}: ${value} is reached through different rewrites (${rewrites.map((r) => r || 'none').join(', ')})`],
     };
   }
   const rewrite = reached[0]?.rewrite;
@@ -124,7 +121,7 @@ function composeOne(entries: Declared[], names: ResourceNames): { service?: Comp
     );
     if (result.bundle.permissions.length === 0) {
       return {
-        problems: [`${entries.map((e) => e.origin).join(', ')}: no operation of ${value}'s document is reached by its routes`],
+        problems: [`${origins}: no operation of ${value}'s document is reached by its routes`],
       };
     }
     return {
@@ -137,7 +134,7 @@ function composeOne(entries: Declared[], names: ResourceNames): { service?: Comp
       problems: [],
     };
   } catch (error) {
-    return { problems: [`${entries.map((e) => e.origin).join(', ')}: ${(error as Error).message}`] };
+    return { problems: [`${origins}: ${(error as Error).message}`] };
   }
 }
 
@@ -146,12 +143,15 @@ function composeOne(entries: Declared[], names: ResourceNames): { service?: Comp
  * last composed to, or stays absent if it never did; the rest go ahead. A
  * collision between prefixes, or a change that would strand grants, refuses
  * the whole reconcile, since no one prefix can be held to fix it.
+ *
+ * @param granted  the permissions the deployment's roles grant
  */
 export function reconcile(
   declared: Declared[],
   names: ResourceNames = {},
   previous?: { catalog?: ServiceCatalog[]; services?: Record<string, ComposedService> },
   migrations: Migrations = {},
+  granted?: ReadonlySet<string>,
 ): Reconciled {
   const origins = declared.map((d) => d.origin);
   const byValue = new Map<string, Declared[]>();
@@ -182,7 +182,7 @@ export function reconcile(
   // something else, or nothing. The deployment says what happens to those
   // before the change reaches the gateway.
   if (previous?.catalog !== undefined) {
-    const unresolved = ungated(diffCatalogs(previous.catalog, composition.catalog), migrations);
+    const unresolved = ungated(diffCatalogs(previous.catalog, composition.catalog), migrations, granted);
     if (unresolved.length > 0) return { problems: [...problems, ...unresolved], held, origins, services };
   }
 

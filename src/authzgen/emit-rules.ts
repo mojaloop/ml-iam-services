@@ -146,12 +146,19 @@ export const reachesSubtree = (mounts: Mount[], method: string, prefix: string):
   return under === undefined || under.length > 0;
 };
 
+/** A path template as a pattern: each `{param}` matches one segment. */
+const templatePattern = (template: string): string =>
+  segments(template)
+    .map((segment) => (paramName(segment) === undefined ? `/${escape(segment)}` : '/[^/]+'))
+    .join('');
+
 /**
  * A prefix and everything under it the route sends here, less what the
- * backend's document path and other backends on the same hosts answer: two
- * rules matching one request is a 500, so the subtree gives those paths up.
+ * backend's document path, its internal operations and other backends on the
+ * same hosts answer: two rules matching one request is a 500, and an internal
+ * operation is matched by none, so the subtree gives those paths up.
  */
-const subtree = (prefix: string, serving: Serving, method?: string): string => {
+const subtree = (prefix: string, serving: Serving, method?: string, internal: string[] = []): string => {
   const within = (path: string): string | undefined =>
     prefix === '' ? path : path === prefix || path.startsWith(`${prefix}/`) ? path.slice(prefix.length) : undefined;
 
@@ -159,9 +166,10 @@ const subtree = (prefix: string, serving: Serving, method?: string): string => {
   const excluded = [
     ...(document === undefined ? [] : [within(document)]),
     ...(serving.exclude ?? []).map((path) => within(trimSlash(path))),
+    ...internal,
   ].filter((path): path is string => path !== undefined && path !== '');
 
-  const guards = [...new Set(excluded)].sort().map((path) => `${escape(path)}(?:/|$)`);
+  const guards = [...new Set(excluded)].sort().map((path) => `${templatePattern(path)}(?:/|$)`);
   const guard = guards.length ? `(?!${guards.join('|')})` : '';
   const reached = reachedUnder(prefix, serving, method);
   return reached === undefined ? `<${guard}(?:/.*)?>` : `<${guard}(?:${reached.join('|')})>`;
@@ -186,7 +194,7 @@ export const matchUrl = (
   // An operation at the root is the mount itself, and a mount owns the URL
   // space under it: one permission for an application whose own routes are
   // resolved past the gateway. An operation under a path answers at that path.
-  const extent = parts.length ? '<$>' : subtree(prefix, serving, permission.method);
+  const extent = parts.length ? '<$>' : subtree(prefix, serving, permission.method, bundle.internalPaths);
   return `<http|https>://${hostPart(serving.hosts)}${prefix}${path}${extent}`;
 };
 
@@ -237,7 +245,10 @@ const preflight = (bundle: ServiceBundle, serving: Serving): unknown => {
   const prefix = prefixOf(bundle, serving);
   return {
     id: `${bundle.service}.preflight`,
-    match: { url: `<http|https>://${hostPart(serving.hosts)}${prefix}${subtree(prefix, serving)}`, methods: ['OPTIONS'] },
+    match: {
+      url: `<http|https>://${hostPart(serving.hosts)}${prefix}${subtree(prefix, serving, undefined, bundle.internalPaths)}`,
+      methods: ['OPTIONS'],
+    },
     authenticators: [{ handler: 'noop' }],
     authorizer: { handler: 'allow' },
     mutators: [{ handler: 'noop' }],
@@ -245,6 +256,6 @@ const preflight = (bundle: ServiceBundle, serving: Serving): unknown => {
 };
 
 export function emitRules(bundle: ServiceBundle, serving: Serving = {}): unknown[] {
-  const allPaths = [...new Set(bundle.permissions.map((p) => p.path))];
+  const allPaths = [...new Set([...bundle.permissions.map((p) => p.path), ...bundle.internalPaths])];
   return [preflight(bundle, serving), ...bundle.permissions.map((p) => rule(p, bundle, allPaths, serving))];
 }

@@ -21,10 +21,10 @@ import { Permission, ScopedType, ServiceBundle } from './types';
  *                   <type>/<id>, and every scoping type is handed to the
  *                   service to narrow by, whether bound or not
  *   singleton       an operation with no bound type, checked against __self__
+ *   internal        x-authz.internal: no permission, and no rule reaches it
  *
  * How a caller proves who they are is the deployment's business. A document's
- * own `security` is documentation, and nothing here reads it: an operation
- * open to everyone is one the `$everyone` role grants.
+ * own `security` is documentation, and nothing here reads it.
  */
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
@@ -41,11 +41,6 @@ const pathParams = (path: string): string[] =>
     .filter(Boolean)
     .flatMap((segment) => (segment.startsWith('{') && segment.endsWith('}') ? [segment.slice(1, -1)] : []));
 
-/**
- * The kinds of credential an operation accepts, read from the schemes the
- * document declares. Which authenticator answers a kind is the gateway's
- * business, so only the kind travels from here.
- */
 /**
  * @param service  the authorization namespace the route this document serves
  *                 is annotated with
@@ -73,7 +68,7 @@ export function derive(doc: Doc, service: string): ServiceBundle {
 
   const { basePath, operations } = readDocument(doc);
 
-  const permissions: Permission[] = operations.map((operation) => {
+  const permissions: Permission[] = operations.filter((operation) => !operation.internal).map((operation) => {
     const params = pathParams(operation.template);
 
     // Checks are emitted in capture order, so bound types sort by their
@@ -132,5 +127,6 @@ export function derive(doc: Doc, service: string): ServiceBundle {
     basePath,
     permissions,
     resourceTypes,
+    internalPaths: [...new Set(operations.filter((operation) => operation.internal).map((operation) => operation.template))],
   };
 }

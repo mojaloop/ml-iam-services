@@ -31,6 +31,8 @@ export interface ServiceBundle {
   basePath: string;
   permissions: Permission[];
   resourceTypes: string[];
+  /** Paths of internal operations: no rule is emitted for them, and no other rule matches them. */
+  internalPaths: string[];
 }
 
 /**

@@ -27,6 +27,8 @@ export interface OperatorOptions {
   names?: ResourceNames;
   /** Where the grants of a removed or changed permission go. */
   migrations?: Migrations;
+  /** The permissions the deployment's roles grant: removing or changing one needs a migration. */
+  granted?: ReadonlySet<string>;
   /** The ConfigMap the gateway and Keto read. */
   publishAs?: string;
   /** How often served documents are read again, since a rollout changes them without touching a route. */
@@ -168,6 +170,7 @@ export class Operator {
       this.options.names ?? {},
       { catalog: this.accepted?.composition?.catalog, services: this.accepted?.services },
       this.options.migrations ?? {},
+      this.options.granted,
     );
     const problems = [...routeProblems, ...result.problems];
     const reported = { ...result, problems };

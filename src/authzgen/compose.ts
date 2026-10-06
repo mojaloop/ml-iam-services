@@ -276,17 +276,19 @@ export function diffCatalogs(previous: ServiceCatalog[], next: ServiceCatalog[])
 export type Migrations = Record<string, string | null>;
 
 /**
- * A removal or a change is allowed to reach a deployment only when the rollout
- * says what happens to the grants: a new permission id to move them to, or
- * null to retire them.
+ * Removing or changing a permission a role grants reaches a deployment only
+ * when the rollout says what happens to those grants: a new permission id to
+ * move them to, or null to retire them. Without `granted`, every permission
+ * counts as granted.
  */
-export function ungated(diff: CatalogDiff, migrations: Migrations = {}): string[] {
+export function ungated(diff: CatalogDiff, migrations: Migrations = {}, granted?: ReadonlySet<string>): string[] {
+  const gated = (id: string): boolean => !(id in migrations) && (granted === undefined || granted.has(id));
   const problems: string[] = [];
   for (const id of diff.removed) {
-    if (!(id in migrations)) problems.push(`${id} is gone and no migration says where its grants go`);
+    if (gated(id)) problems.push(`${id} is gone and no migration says where its grants go`);
   }
   for (const change of diff.changed) {
-    if (!(change.id in migrations)) {
+    if (gated(change.id)) {
       problems.push(`${change.id} was ${change.was} and is now ${change.now}, with no migration`);
     }
   }

@@ -1,5 +1,8 @@
 import { test } from 'vitest';
 import assert from 'node:assert/strict';
+import { mkdtemp, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 
 import { createGuard, guardReaching, restrictedTo, EVERYTHING, UNRESTRICTED, Forbidden, GuardError } from '~/index';
 
@@ -190,4 +193,20 @@ test('a scopedBy entry that is neither a type nor one binding is refused at star
     scopedBy: [{ orders: 'orderId', customers: 'customerId' }],
   };
   await assert.rejects(() => createGuard(bad), /a scopedBy entry is a type, or one/);
+});
+
+test('an internal operation is served with nothing to narrow', async () => {
+  const probed: Fixture = structuredClone(doc);
+  probed.paths['/health'].get['x-authz'] = { internal: true };
+  const guard = await createGuard(probed);
+  assert.deepEqual(guard.scopedBy(req('/api/health')), []);
+});
+
+test('a document older than OpenAPI 3.1 is refused at startup', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'authz-'));
+  const file = join(dir, 'openapi.json');
+  await writeFile(file, JSON.stringify({ ...doc, openapi: '3.0.3' }));
+  await assert.rejects(() => createGuard(file), /OpenAPI 3\.0\.3 is not supported; the document must declare 3\.1 or later/);
+  await writeFile(file, JSON.stringify(doc));
+  await assert.doesNotReject(() => createGuard(file));
 });

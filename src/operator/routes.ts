@@ -109,9 +109,17 @@ export function readRoute(route: HTTPRouteResource, listenerHosts: string[] = []
     const backend = rest.slice(0, dot);
     keys.set(backend, { ...keys.get(backend), [setting]: value });
   }
-  if (keys.size === 0) return { backends: [], problems, unenforced };
-
   const rules = route.spec?.rules ?? [];
+  if (keys.size === 0) {
+    const asking = new Set(
+      rules.filter(asksPlatform).flatMap((rule) => (rule.backendRefs ?? []).filter(isServiceRef).map((ref) => ref.name)),
+    );
+    for (const name of [...asking].filter((name): name is string => name !== undefined).sort()) {
+      problems.push(`HTTPRoute/${id}: backend ${name} has no ${ANNOTATION_PREFIX}${name}.service; nothing it answers is authorized`);
+    }
+    return { backends: [], problems, unenforced };
+  }
+
   const refs = rules.flatMap((rule) => (rule.backendRefs ?? []).filter(isServiceRef));
 
   const namespacesOf = new Map<string, Set<string>>();

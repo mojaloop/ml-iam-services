@@ -57,8 +57,20 @@ describe('reading a route', () => {
     ]);
   });
 
-  it('reads nothing from a route no annotation opts in', () => {
-    expect(readRoute(route({}, [rule('mcm-api')]))).toEqual({ backends: [], problems: [], unenforced: [] });
+  it('reads nothing from a route that neither carries a key nor asks the platform', () => {
+    expect(readRoute(route({}, [rule('mcm-api', '/', { filters: [] })]))).toEqual({
+      backends: [],
+      problems: [],
+      unenforced: [],
+    });
+  });
+
+  it('names every backend a route without keys sends through the platform', () => {
+    const read = readRoute(route({}, [rule('mcm-api', '/api'), rule('mcm-ui', '/', { filters: [] })]));
+    expect(read.backends).toEqual([]);
+    expect(read.problems).toEqual([
+      'HTTPRoute/mcm/mcm-api: backend mcm-api has no iam.mojaloop.io/mcm-api.service; nothing it answers is authorized',
+    ]);
   });
 
   it('collects every rule reaching one backend', () => {

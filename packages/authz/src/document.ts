@@ -10,6 +10,13 @@
  *   x-authz:                            # on an operation
  *     scopedBy: [orders]                # the types its answer is scoped by
  *
+ *   x-authz:
+ *     internal: true                    # answered inside the cluster only
+ *
+ * An internal operation is no permission and the gateway has no rule for it,
+ * so it is unreachable from outside: health and metrics endpoints a kubelet or
+ * a scraper calls on the pod itself.
+ *
  * A type the path binds an id for is checked by the gateway as `<type>/<id>`.
  * Every scoping type, bound or not, reaches the service as what the caller
  * holds of it, which is what the service narrows its own rows by.
@@ -41,6 +48,8 @@ export interface DeclaredOperation {
   list: boolean;
   /** The resource types the answer is scoped by, and where the path carries an id. */
   scopedBy: Scoping[];
+  /** Answered inside the cluster only; never a permission. */
+  internal: boolean;
 }
 
 export interface ReadDocument {
@@ -53,6 +62,7 @@ type ScopedByEntry = string | Record<string, string>;
 
 interface AuthzBlock {
   scopedBy?: ScopedByEntry[];
+  internal?: boolean;
 }
 
 interface MediaType {
@@ -154,9 +164,15 @@ const readAuthz = (node: OperationNode, where: string): AuthzBlock => {
     throw new DocumentError(`${where}: x-authz must be an object`);
   }
   const block = authz as AuthzBlock;
-  const known = new Set(['scopedBy']);
+  const known = new Set(['scopedBy', 'internal']);
   for (const key of Object.keys(block)) {
     if (!known.has(key)) throw new DocumentError(`${where}: unknown x-authz key "${key}"`);
+  }
+  if (block.internal !== undefined && typeof block.internal !== 'boolean') {
+    throw new DocumentError(`${where}: x-authz.internal must be true or false`);
+  }
+  if (block.internal === true && block.scopedBy !== undefined) {
+    throw new DocumentError(`${where}: an internal operation is no permission, so it has no scopedBy`);
   }
   if (block.scopedBy !== undefined) {
     if (!Array.isArray(block.scopedBy)) {
@@ -233,10 +249,11 @@ export const readDocument = (doc: unknown): ReadDocument => {
       if (!operation.summary) throw new DocumentError(`${where}: summary is required for the catalog`);
 
       const authz = readAuthz(operation, where);
+      const internal = authz.internal === true;
       const bound = boundTypes(template);
       const list = returnsArray(operation);
 
-      if (method === 'GET' && bound.size === 0 && authz.scopedBy === undefined && list) {
+      if (!internal && method === 'GET' && bound.size === 0 && authz.scopedBy === undefined && list) {
         throw new DocumentError(
           `${where}: returns a list and binds no resource id, so x-authz.scopedBy must name the row type, or be [] to declare the rows unscoped`,
         );
@@ -245,8 +262,9 @@ export const readDocument = (doc: unknown): ReadDocument => {
       // By default an operation is scoped by the resource its outermost
       // parameter identifies; types deeper in the path are business data
       // inside it.
-      const declared =
-        authz.scopedBy !== undefined
+      const declared = internal
+        ? []
+        : authz.scopedBy !== undefined
           ? scopedByOf(authz.scopedBy, template, bound, where)
           : [...bound.entries()].slice(0, 1).map(([type, param]) => ({ type, param }));
 
@@ -260,6 +278,7 @@ export const readDocument = (doc: unknown): ReadDocument => {
         list,
         /** Each entry carries the path parameter holding an id, when the path binds one. */
         scopedBy: declared,
+        internal,
       });
     }
   }
@@ -277,8 +296,8 @@ export const loadDocument = async (file: string): Promise<unknown> => {
   const text = await fs.promises.readFile(file, 'utf8');
   const doc = file.endsWith('.json') ? JSON.parse(text) : parseYaml(text);
   const version = String((doc as DocumentNode)?.openapi ?? '');
-  if (!version.startsWith('3.')) {
-    throw new DocumentError(`${file}: OpenAPI ${version || '(none)'} is not a version this platform speaks`);
+  if (!/^3\.[1-9]\d*\./.test(`${version}.`)) {
+    throw new DocumentError(`${file}: OpenAPI ${version || '(none)'} is not supported; the document must declare 3.1 or later`);
   }
   return doc;
 };

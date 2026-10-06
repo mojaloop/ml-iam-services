@@ -328,6 +328,7 @@ export async function start(options: StartOptions): Promise<void> {
       namespace: options.namespace,
       names,
       ...(options.migrations !== undefined ? { migrations: read<Migrations>(options.migrations) } : {}),
+      granted: new Set(Object.values(roles.roles).flatMap((role) => role.grants.map((grant) => grant.permission))),
       ...(options.publishAs !== undefined ? { publishAs: options.publishAs } : {}),
       onAccepted: (result) => {
         if (result.composition !== undefined) {

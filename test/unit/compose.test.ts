@@ -44,12 +44,11 @@ const bundle = (service: string, permissions: CatalogPermission[]): ServiceBundl
     path: p.path,
     summary: p.summary,
     deprecated: false,
-    anonymous: false,
-    security: ['apiKey:cookie'],
     scopedBy: p.scopedBy.map((type) =>
       p.bound.includes(type) ? { type, param: `${type}Id`, captureIndex: 1 } : { type },
     ),
   })),
+  internalPaths: [],
 });
 
 const service = (name: string, permissions: CatalogPermission[], rules = ''): ComposedService => ({
@@ -205,6 +204,14 @@ describe('the diff gate', () => {
     expect(diff.changed).toEqual([{ id: 'mcm.a', was: 'a over [dfsps]', now: 'a over []' }]);
     expect(ungated(diff)).toHaveLength(1);
     expect(ungated(diff, { 'mcm.a': 'mcm.a' })).toEqual([]);
+  });
+
+  it('lets a permission no role grants be removed or changed without a migration', () => {
+    const after = [catalog('mcm', [permission('mcm.a', ['dfsps'], [])])];
+    const diff = diffCatalogs(before, after);
+    expect(ungated(diff, {}, new Set())).toEqual([]);
+    expect(ungated(diff, {}, new Set(['mcm.b']))).toEqual(['mcm.b is gone and no migration says where its grants go']);
+    expect(ungated(diff, {}, new Set(['mcm.a']))).toEqual(['mcm.a was a over [dfsps] and is now a over [], with no migration']);
   });
 });
 
