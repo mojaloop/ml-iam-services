@@ -15,7 +15,7 @@ export default tseslint.config(
       '@typescript-eslint/no-explicit-any': 'error',
       'no-console': 'off',
       'quote-props': ['error', 'as-needed'],
-      quotes: ['error', 'single', { allowTemplateLiterals: true }],
+      quotes: ['error', 'single', { allowTemplateLiterals: true, avoidEscape: true }],
       indent: ['error', 2, { SwitchCase: 1 }],
       semi: ['error'],
       'simple-import-sort/imports': 'error',
