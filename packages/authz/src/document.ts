@@ -296,8 +296,8 @@ export const loadDocument = async (file: string): Promise<unknown> => {
   const text = await fs.promises.readFile(file, 'utf8');
   const doc = file.endsWith('.json') ? JSON.parse(text) : parseYaml(text);
   const version = String((doc as DocumentNode)?.openapi ?? '');
-  if (!/^3\.[1-9]\d*\./.test(`${version}.`)) {
-    throw new DocumentError(`${file}: OpenAPI ${version || '(none)'} is not supported; the document must declare 3.1 or later`);
+  if (!version.startsWith('3.')) {
+    throw new DocumentError(`${file}: OpenAPI ${version || '(none)'} is not a version this platform speaks`);
   }
   return doc;
 };

@@ -7,7 +7,7 @@ import type { Context } from 'openapi-backend';
 import { OpenAPIBackend } from 'openapi-backend';
 import { parse as parseYaml } from 'yaml';
 
-import { accessRules, Migrations, ResourceNames } from '../authzgen/compose';
+import { accessRules, ResourceNames } from '../authzgen/compose';
 import { ketoNamespace } from '../authzgen/keto-name';
 import { ServiceCatalog } from '../authzgen/types';
 import { Operator } from '../operator/server';
@@ -242,7 +242,6 @@ export interface StartOptions {
   roles: string;
   /** Composed catalogs to read, for a run with no namespace to compose in. */
   catalog?: string[];
-  migrations?: string;
   adminEmail?: string;
   /** Without one, a created admin is invited by email to set a password. */
   adminPassword?: string;
@@ -327,8 +326,6 @@ export async function start(options: StartOptions): Promise<void> {
     operator = new Operator({
       namespace: options.namespace,
       names,
-      ...(options.migrations !== undefined ? { migrations: read<Migrations>(options.migrations) } : {}),
-      granted: new Set(Object.values(roles.roles).flatMap((role) => role.grants.map((grant) => grant.permission))),
       ...(options.publishAs !== undefined ? { publishAs: options.publishAs } : {}),
       onAccepted: (result) => {
         if (result.composition !== undefined) {
@@ -392,7 +389,6 @@ export async function start(options: StartOptions): Promise<void> {
   }
 
   const applied = await applyRoles(keto, current.ready.file, current.index, {
-    ...(options.migrations !== undefined ? { migrations: read<Migrations>(options.migrations) } : {}),
     ...(options.adminEmail !== undefined && options.adminRole !== undefined && options.kratosAdminUrl !== undefined
       ? {
         admin: {

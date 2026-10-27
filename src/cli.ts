@@ -43,7 +43,6 @@ program
     '-c, --catalog <path...>',
     'composed catalogs to read, when it composes no namespace of its own',
   )
-  .option('--migrations <path>', 'where the grants of a renamed or retired permission go')
   .option(
     '--admin-email <email>',
     'identity to create and add to the admin role',

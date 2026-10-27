@@ -1,14 +1,5 @@
 import { clientPath, emitCatalog, generate, reachesSubtree, Rewrite } from '../authzgen';
-import {
-  compose,
-  ComposedService,
-  Composition,
-  diffCatalogs,
-  Migrations,
-  ResourceNames,
-  ungated,
-} from '../authzgen/compose';
-import { ServiceCatalog } from '../authzgen/types';
+import { compose, ComposedService, Composition, ResourceNames } from '../authzgen/compose';
 import { Reach, reaches } from './routes';
 
 /**
@@ -141,17 +132,13 @@ function composeOne(entries: Declared[], names: ResourceNames): { service?: Comp
 /**
  * Composes every prefix the routes key. A prefix with a problem keeps what it
  * last composed to, or stays absent if it never did; the rest go ahead. A
- * collision between prefixes, or a change that would strand grants, refuses
- * the whole reconcile, since no one prefix can be held to fix it.
- *
- * @param granted  the permissions the deployment's roles grant
+ * collision between prefixes refuses the whole reconcile, since no one prefix
+ * can be held to fix it.
  */
 export function reconcile(
   declared: Declared[],
   names: ResourceNames = {},
-  previous?: { catalog?: ServiceCatalog[]; services?: Record<string, ComposedService> },
-  migrations: Migrations = {},
-  granted?: ReadonlySet<string>,
+  previous?: { services?: Record<string, ComposedService> },
 ): Reconciled {
   const origins = declared.map((d) => d.origin);
   const byValue = new Map<string, Declared[]>();
@@ -176,14 +163,6 @@ export function reconcile(
   const composition = compose(Object.values(services), names);
   if (composition.problems.length > 0) {
     return { problems: [...problems, ...composition.problems], held, origins, services };
-  }
-
-  // A permission that changed shape or left is a grant that silently means
-  // something else, or nothing. The deployment says what happens to those
-  // before the change reaches the gateway.
-  if (previous?.catalog !== undefined) {
-    const unresolved = ungated(diffCatalogs(previous.catalog, composition.catalog), migrations, granted);
-    if (unresolved.length > 0) return { problems: [...problems, ...unresolved], held, origins, services };
   }
 
   return { composition, problems, held, origins, services };

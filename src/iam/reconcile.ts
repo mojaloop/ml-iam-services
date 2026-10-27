@@ -1,9 +1,7 @@
-import { Migrations } from '../authzgen/compose';
 import { broken, heldRoles, permissionsOf, rolesNamed } from './exclusions';
 import { KetoWriter } from './keto';
 import { KratosAdmin } from './kratos';
 import { materialize, materializeRole, MEMBERS, membership, ROLE_NAMESPACE, Tuple } from './materialize';
-import { migrate } from './migrate';
 import { parseInstance } from './provisioner';
 import { openResourceNames, PermissionIndex, RolesFile } from './roles';
 
@@ -27,15 +25,12 @@ export interface Applied {
   tuples: number;
   /** Role instances a service or an operator created, refreshed from the file. */
   instances: number;
-  moved: number;
-  retired: number;
   /** Holdings that break a rule the file now declares. */
   findings: string[];
   admin?: { email: string; id: string; created: boolean; invited: boolean };
 }
 
 export interface ReconcileOptions {
-  migrations?: Migrations;
   /** Without a password, a created admin is invited by email to set one. */
   admin?: { email: string; role: string; kratosAdminUrl: string; kratosPublicUrl?: string; password?: string };
 }
@@ -82,11 +77,6 @@ export async function applyRoles(
     tuples.push(membership(options.admin.role, admin.id));
   }
 
-  // Before the roles are written, so a grant made in the console under a
-  // permission's old name survives this rollout under the new one.
-  const { moved, retired } =
-    options.migrations === undefined ? { moved: 0, retired: 0 } : await migrate(keto, options.migrations);
-
   const instances = await runtimeInstances(keto, file, index);
   for (const instance of instances) {
     tuples.push(...materializeRole(instance.role, file.roles[instance.role]!, index, instance.resources));
@@ -113,8 +103,6 @@ export async function applyRoles(
     roles: Object.keys(file.roles).length,
     tuples: tuples.length,
     instances: instances.length,
-    moved,
-    retired,
     findings,
     ...(options.admin !== undefined && admin !== undefined
       ? { admin: { email: options.admin.email, ...admin } }
@@ -130,7 +118,6 @@ export const report = (applied: Applied): string[] => [
           (applied.admin.invited ? ', invited by email' : ''),
     ]
     : []),
-  ...(applied.moved + applied.retired > 0 ? [`Moved ${applied.moved} grants, retired ${applied.retired}`] : []),
   `Applied ${applied.roles} roles as ${applied.tuples} tuples, ${applied.instances} instances refreshed`,
   ...applied.findings.map((f) => `ALREADY HELD  ${f}`),
 ];

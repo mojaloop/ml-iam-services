@@ -2,7 +2,7 @@ import { mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
-import { compose, ComposedService, diffCatalogs, ungated } from '../../src/authzgen/compose';
+import { compose, ComposedService } from '../../src/authzgen/compose';
 import { derive } from '../../src/authzgen/derive';
 import { CANONICAL_STUBS } from '../../src/authzgen/emit-model';
 import { ketoNamespace } from '../../src/authzgen/keto-name';
@@ -177,41 +177,6 @@ describe('composing a deployment', () => {
     const doc = { paths: { '/x': { get: { operationId: 'get', summary: 'x', security: [] } } } };
     expect(() => derive(doc, 'portal.shell')).toThrow(/is not a permission prefix/);
     expect(() => derive(doc, 'portal-shell')).not.toThrow();
-  });
-});
-
-describe('the diff gate', () => {
-  const before = [catalog('mcm', [permission('mcm.a', ['dfsps'], ['dfsps']), permission('mcm.b')])];
-
-  it('sees an addition, which nobody holds yet', () => {
-    const after = [catalog('mcm', [...before[0]!.permissions, permission('mcm.c')])];
-    const diff = diffCatalogs(before, after);
-    expect(diff).toEqual({ added: ['mcm.c'], removed: [], changed: [] });
-    expect(ungated(diff)).toEqual([]);
-  });
-
-  it('sees a removal, which orphans every grant on it', () => {
-    const after = [catalog('mcm', [permission('mcm.a', ['dfsps'], ['dfsps'])])];
-    const diff = diffCatalogs(before, after);
-    expect(diff.removed).toEqual(['mcm.b']);
-    expect(ungated(diff)).toEqual(['mcm.b is gone and no migration says where its grants go']);
-    expect(ungated(diff, { 'mcm.b': null })).toEqual([]);
-  });
-
-  it('sees a permission whose stored tuples would stop answering', () => {
-    const after = [catalog('mcm', [permission('mcm.a', ['dfsps'], []), permission('mcm.b')])];
-    const diff = diffCatalogs(before, after);
-    expect(diff.changed).toEqual([{ id: 'mcm.a', was: 'a over [dfsps]', now: 'a over []' }]);
-    expect(ungated(diff)).toHaveLength(1);
-    expect(ungated(diff, { 'mcm.a': 'mcm.a' })).toEqual([]);
-  });
-
-  it('lets a permission no role grants be removed or changed without a migration', () => {
-    const after = [catalog('mcm', [permission('mcm.a', ['dfsps'], [])])];
-    const diff = diffCatalogs(before, after);
-    expect(ungated(diff, {}, new Set())).toEqual([]);
-    expect(ungated(diff, {}, new Set(['mcm.b']))).toEqual(['mcm.b is gone and no migration says where its grants go']);
-    expect(ungated(diff, {}, new Set(['mcm.a']))).toEqual(['mcm.a was a over [dfsps] and is now a over [], with no migration']);
   });
 });
 

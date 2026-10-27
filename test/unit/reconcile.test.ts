@@ -284,22 +284,12 @@ describe('reconciling what the routes key', () => {
     ).toEqual([]);
   });
 
-  /**
-   * A permission that leaves is a grant that silently means nothing, so the
-   * deployment says what happens to it before the change reaches the gateway.
-   */
-  it('refuses a change that would strand grants, until a migration names it', () => {
+  it('composes a document that dropped an operation the last composition had', () => {
     const before = reconcile([declared('alpha', ['/widgets/{widgetId}'])], widgets);
     const gadgets = naming({ service: 'alpha', type: 'gadgets' });
-    const previous = { catalog: before.composition?.catalog };
-    const after = reconcile([declared('alpha', ['/gadgets/{gadgetId}'])], gadgets, previous);
-    expect(after.composition).toBeUndefined();
-    expect(after.problems.join(' ')).toContain('alpha.getwidgets');
-
-    const migrated = reconcile([declared('alpha', ['/gadgets/{gadgetId}'])], gadgets, previous, {
-      'alpha.getwidgets': null,
-    });
-    expect(migrated.problems).toEqual([]);
+    const after = reconcile([declared('alpha', ['/gadgets/{gadgetId}'])], gadgets, { services: before.services });
+    expect(after.problems).toEqual([]);
+    expect(after.composition?.catalog[0]?.permissions.map((p) => p.id)).toEqual(['alpha.getgadgets']);
   });
 });
 

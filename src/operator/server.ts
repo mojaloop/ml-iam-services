@@ -1,4 +1,4 @@
-import { accessRules, Migrations, ResourceNames } from '../authzgen/compose';
+import { accessRules, ResourceNames } from '../authzgen/compose';
 import {
   AuthzDocument,
   Gateway,
@@ -25,10 +25,6 @@ export interface OperatorOptions {
   namespace: string;
   /** What the deployment says its services' vocabularies have in common. */
   names?: ResourceNames;
-  /** Where the grants of a removed or changed permission go. */
-  migrations?: Migrations;
-  /** The permissions the deployment's roles grant: removing or changing one needs a migration. */
-  granted?: ReadonlySet<string>;
   /** The ConfigMap the gateway and Keto read. */
   publishAs?: string;
   /** How often served documents are read again, since a rollout changes them without touching a route. */
@@ -165,13 +161,7 @@ export class Operator {
       }),
     );
 
-    const result = reconcile(
-      declared,
-      this.options.names ?? {},
-      { catalog: this.accepted?.composition?.catalog, services: this.accepted?.services },
-      this.options.migrations ?? {},
-      this.options.granted,
-    );
+    const result = reconcile(declared, this.options.names ?? {}, { services: this.accepted?.services });
     const problems = [...routeProblems, ...result.problems];
     const reported = { ...result, problems };
 
