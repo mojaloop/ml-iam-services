@@ -1,7 +1,7 @@
 import { ResourceNames } from '../authzgen/compose';
-import { broken, permissionsOf, rolesNamed } from './exclusions';
+import { broken, holdingsOf } from './exclusions';
 import { difference, filterFor, KetoWriter } from './keto';
-import { materializeRole, MEMBERS, membership, ROLE_NAMESPACE, roleObject, Tuple } from './materialize';
+import { materializeRole, MEMBERS, membership, parseInstance, ROLE_NAMESPACE, roleObject, Tuple } from './materialize';
 import { provision, ProvisionRequest } from './provision';
 import {
   EXISTS,
@@ -17,18 +17,6 @@ export interface Assignment {
   resources: Record<string, string>;
 }
 
-/** A role instance object read back into the role and the resources it stands for. */
-export const parseInstance = (object: string): Assignment => {
-  const at = object.indexOf('@');
-  if (at < 0) return { role: object, resources: {} };
-  const resources: Record<string, string> = {};
-  for (const pair of object.slice(at + 1).split(',')) {
-    const eq = pair.indexOf('=');
-    if (eq > 0) resources[pair.slice(0, eq)] = pair.slice(eq + 1);
-  }
-  return { role: object.slice(0, at), resources };
-};
-
 /**
  * Writes what a provisioning request means, and unwinds it again. The only
  * component that holds Keto write access, so a service can cause permissions
@@ -39,13 +27,18 @@ export class Provisioner {
     private readonly keto: KetoWriter,
     private roles: RolesFile,
     private index: PermissionIndex,
-    private readonly names: ResourceNames = {},
+    private names: ResourceNames = {},
   ) {}
 
   /** The roles and catalog that are live now, as compositions add services. */
   use(roles: RolesFile, index: PermissionIndex): void {
     this.roles = roles;
     this.index = index;
+  }
+
+  /** The deployment's vocabulary as its resource names now declare it. */
+  useNames(names: ResourceNames): void {
+    this.names = names;
   }
 
   /** The declared vocabulary is the registry's key space, so a name outside it is refused. */
@@ -140,6 +133,9 @@ export class Provisioner {
   async problemsWith(subject: string, assignment: Assignment, granting = true): Promise<string[]> {
     const role = this.roles.roles[assignment.role];
     if (role === undefined) return [`unknown role ${assignment.role}`];
+    if (role.heldBy !== undefined) {
+      return [`role ${assignment.role} is held by every ${role.heldBy} subject and is never assigned`];
+    }
 
     const expected = openResourceNames(role, this.index);
     const given = Object.keys(assignment.resources);
@@ -167,9 +163,8 @@ export class Provisioner {
     const exclusions = this.roles.exclusions ?? [];
     if (exclusions.length === 0) return [];
 
-    const held = (await this.assignments(subject)).map((a) => a.role);
-    const after = rolesNamed(this.roles, [...held, assignment.role]);
-    return broken(permissionsOf(after), exclusions);
+    const held = await this.assignments(subject);
+    return broken(holdingsOf(this.roles, [...held, assignment]), exclusions, this.index);
   }
 
   /**

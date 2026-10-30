@@ -1,5 +1,5 @@
 import { CatalogPermission, ServiceCatalog } from '../authzgen/types';
-import { Exclusion, validateExclusions } from './exclusions';
+import { Exclusion } from './exclusions';
 
 /**
  * Role documents: the deployment data a role UI or a gitops file produces, and
@@ -27,6 +27,8 @@ export interface RoleGrant {
 
 export interface RoleDocument {
   grants: RoleGrant[];
+  /** Held by every authenticated subject; never assigned, so it fixes every resource it grants over. */
+  heldBy?: 'authenticated';
 }
 
 export interface Assignment {
@@ -76,7 +78,7 @@ export function readyRoles(file: RolesFile, catalogs: ServiceCatalog[]): ReadyRo
   }
 
   const exclusions = (file.exclusions ?? []).filter((rule) => {
-    const missing = absent([...(rule.a ?? []), ...(rule.b ?? [])]);
+    const missing = absent(rule.groups.flat());
     if (missing.length > 0) pending.push(`exclusion ${rule.name} waits for ${missing.join(', ')}`);
     return missing.length === 0;
   });
@@ -134,6 +136,17 @@ export function validateRoles(file: RolesFile, index: PermissionIndex): string[]
       continue;
     }
 
+    if (role.heldBy !== undefined) {
+      const open = openResourceNames(role, index);
+      if (open.length > 0) {
+        problems.push(`${name}: held by every ${role.heldBy} subject and never assigned, so it cannot leave ${open.join(', ')} open`);
+      }
+      const grouped = new Set((file.exclusions ?? []).flatMap((rule) => rule.groups.flat()));
+      for (const grant of role.grants.filter((g) => grouped.has(g.permission))) {
+        problems.push(`${name}: ${grant.permission} is in a separation group, and every ${role.heldBy} subject holds this role`);
+      }
+    }
+
     for (const grant of role.grants) {
       const permission = index.get(grant.permission);
       if (permission === undefined) {
@@ -155,8 +168,6 @@ export function validateRoles(file: RolesFile, index: PermissionIndex): string[]
       }
     }
   }
-
-  problems.push(...validateExclusions(file, index));
 
   for (const assignment of file.assignments ?? []) {
     const role = file.roles?.[assignment.role];

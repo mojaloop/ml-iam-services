@@ -14,8 +14,9 @@ vi.mock('../../src/operator/cluster', () => ({
   }),
   listDocuments: vi.fn(async () => []),
   listGateways: vi.fn(async () => []),
+  listResourceNames: vi.fn(async () => []),
   publish: vi.fn(async () => undefined),
-  reportOn: vi.fn(async () => undefined),
+  setStatus: vi.fn(async () => undefined),
   reportOnRoute: vi.fn(async () => undefined),
   watchInputs: vi.fn(async (onChange: () => Promise<void>) => {
     cluster.onChange = onChange;

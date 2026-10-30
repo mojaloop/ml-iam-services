@@ -48,8 +48,8 @@ describe('roles waiting for their services', () => {
       { subject: 'carol', role: 'nobody' },
     ],
     exclusions: [
-      { name: 'regions-vs-ca', a: ['example.getRegions'], b: ['example.getWidgetCa'] },
-      { name: 'regions-vs-positions', a: ['example.getRegions'], b: ['ledger.getPositions'] },
+      { name: 'regions-vs-ca', groups: [['example.getRegions'], ['example.getWidgetCa']] },
+      { name: 'regions-vs-positions', groups: [['example.getRegions'], ['ledger.getPositions']] },
     ],
   };
 

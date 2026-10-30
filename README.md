@@ -23,13 +23,14 @@ Keto access, no gateway route, and the single audit point: one record per
 decision either way.
 
 **`provisioning`** is the write side, and the only thing in the platform holding
-a Keto write URL. It applies the deployment's role documents when it starts,
-validating every grant against the generated catalog first, so a role naming a
-permission no service advertises stops the rollout instead of writing a tuple
-nothing will check; it creates the first administrator on the way; then it
-serves the resources, roles and assignments the platform asks for. A service
-that creates a resource names the resource and its principals, and the role
-documents decide which roles that implies.
+a Keto write URL. It watches the deployment's roles, separation rules and
+resource names, applies every change to them as it lands, and writes each
+object's verdict back onto it: a role naming a permission no service
+advertises is refused instead of writing a tuple nothing will check. It
+creates the first administrator on its first apply, answers admission for its
+kinds, and serves the resources, roles and assignments the platform asks for.
+A service that creates a resource names it, and assigns its configured roles
+over it.
 
 **`capabilities`** answers which of the permissions a caller asked about it
 actually holds. Keto has no reverse index, so a UI rendering a screen or a CLI
@@ -45,7 +46,7 @@ the decision path.
 src/authzgen/     OpenAPI document -> rules, model, catalog, derivation table
 src/operator/     routes -> documents -> one composition, published for the gateway and Keto
 src/decision/     the endpoint Oathkeeper asks, and how a scope is computed
-src/iam/          role documents, materialization, reconciliation, provisioning
+src/iam/          roles and separation rules, materialization, reconciliation, provisioning
 packages/authz/   the X-Scope contract, published for services to install
 ```
 
@@ -64,13 +65,16 @@ npm run build
 # run the endpoint the gateway asks
 npm start decide
 
-# compose the cluster's routes, publish the result, apply the deployment's roles, then serve the IAM
-npm start provisioning -- --roles ./default-roles.json --namespace iam --publish-as authz-composed
+# compose the cluster's routes, publish the result, keep the deployment's roles applied, and serve the IAM
+npm start provisioning -- --namespace iam --publish-as authz-composed
 
-# ...and create the first administrator while applying them
-npm start provisioning -- --roles ./default-roles.json --namespace iam --publish-as authz-composed \
-  --admin-email admin@example.test --admin-password "$PASSWORD"
+# ...and create the first administrator on the first apply
+npm start provisioning -- --namespace iam --publish-as authz-composed \
+  --admin-email admin@example.test --admin-role hub-admin --admin-password "$PASSWORD"
 ```
+
+`provisioning` runs against a cluster: it reads routes, gateways and the
+IAM's kinds from the API server its kubeconfig names.
 
 ## What authzgen emits
 
@@ -78,7 +82,7 @@ npm start provisioning -- --roles ./default-roles.json --namespace iam --publish
 |---|---|
 | access rules | the gateway, published as `access-rules.yml` |
 | Keto model | Keto, one `keto-namespaces.ts` for every service |
-| catalog | the IAM, for the role UI and to validate role documents |
+| catalog | the IAM, for the role UI and to validate roles |
 | derivation table | humans: one line per operation, reviewed and diffed |
 
 The model is two shared classes and one empty class per service, because Keto
@@ -86,32 +90,35 @@ enforces namespaces but not relations and resolves role indirection with no
 permit. The derivation table exists so a wrong conclusion shows up as a changed
 line in review rather than a 403 in staging.
 
-## Role documents
+## The deployment's data
 
-Deployment data, composed in a UI or in gitops, written through this service
-and nowhere else.
+Four kinds in `iam.mojaloop.io/v1`, in any namespace, each name unique across
+the cluster:
 
-```json
-{
-  "roles": {
-    "hub-admin": {
-      "grants": [{ "permission": "mcm.getDFSPs" },
-                 { "permission": "mcm.getDFSPca", "bind": { "dfsps": "all" } }]
-    },
-    "dfsp-operator": {
-      "params": ["dfspId"],
-      "onProvision": "admin",
-      "grants": [{ "permission": "mcm.getDFSPca", "bind": { "dfsps": "$dfspId" } }]
-    }
-  }
-}
+| kind | holds |
+|---|---|
+| `AuthzRole` | one role: a set of grants |
+| `AuthzSeparation` | groups of permissions no one subject may hold across |
+| `AuthzResourceName` | one name for a thing services spell differently |
+| `AuthzDocument` | the document of a backend that serves none |
+
+```yaml
+apiVersion: iam.mojaloop.io/v1
+kind: AuthzRole
+metadata:
+  name: dfsp-operator
+spec:
+  grants:
+    - permission: mcm.getDFSPca                       # participant left open
+    - permission: mcm.getDFSPs
+      resources: { participant: all }
 ```
 
-A grant binds each type its permission's path carries an id for, which the
-catalog states as `bound`. A role with parameters instantiates per assignment,
-against `Role:dfsp-operator@dfspId=dfsp7`, so assignment and revocation stay one
-membership edge. `onProvision` names the principal that receives the role when
-its resource appears, which is what makes onboarding need no operator step.
+A grant names, per resource name its permission is scoped by, `all`, one id, a
+list, or nothing. A role leaving a resource name open instantiates per
+assignment, against `Role:dfsp-operator@participant=dfsp7`, so assignment and
+revocation stay one membership edge. Each object carries a `Ready` condition
+saying whether it was applied, refused and why, or is waiting for a service.
 
 ## Testing
 

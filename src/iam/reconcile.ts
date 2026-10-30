@@ -1,8 +1,7 @@
-import { broken, heldRoles, permissionsOf, rolesNamed } from './exclusions';
+import { broken, heldInstances, holdingsOf } from './exclusions';
 import { difference, filterFor, KetoWriter } from './keto';
 import { KratosAdmin } from './kratos';
-import { materialize, materializeRole, MEMBERS, membership, ROLE_NAMESPACE, Tuple } from './materialize';
-import { parseInstance } from './provisioner';
+import { materialize, materializeRole, MEMBERS, membership, parseInstance, ROLE_NAMESPACE, Tuple } from './materialize';
 import { RESOURCE_NAMESPACE } from './registry';
 import { openResourceNames, PermissionIndex, RolesFile } from './roles';
 
@@ -32,8 +31,14 @@ export interface Applied {
   /** Role instances a service or an operator created, refreshed from the file. */
   instances: number;
   /** Holdings that break a rule the file now declares. */
-  findings: string[];
+  findings: Finding[];
   admin?: { email: string; id: string; created: boolean; invited: boolean };
+}
+
+export interface Finding {
+  subject: string;
+  rule: string;
+  message: string;
 }
 
 export interface ReconcileOptions {
@@ -117,10 +122,12 @@ export async function applyRoles(
   // through a gate, so a rule added today meets combinations granted before it
   // existed. Reported, never repaired: which half to take away is a decision
   // about someone's job.
-  const findings: string[] = [];
-  for (const [subject, roles] of await heldRoles(keto)) {
-    for (const problem of broken(permissionsOf(rolesNamed(file, roles)), file.exclusions ?? [])) {
-      findings.push(`${subject}: ${problem}`);
+  const findings: Finding[] = [];
+  for (const [subject, held] of await heldInstances(keto)) {
+    for (const rule of file.exclusions ?? []) {
+      for (const message of broken(holdingsOf(file, held), [rule], index)) {
+        findings.push({ subject, rule: rule.name, message });
+      }
     }
   }
 
@@ -146,5 +153,5 @@ export const report = (applied: Applied): string[] => [
     ]
     : []),
   `Applied ${applied.roles} roles: ${applied.inserted} grants written, ${applied.deleted} removed, ${applied.instances} instances refreshed`,
-  ...applied.findings.map((f) => `ALREADY HELD  ${f}`),
+  ...applied.findings.map((f) => `ALREADY HELD  ${f.subject}: ${f.message}`),
 ];

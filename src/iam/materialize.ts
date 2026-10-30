@@ -35,6 +35,18 @@ export const roleObject = (name: string, resources: Record<string, string> = {})
   return entries.length === 0 ? name : `${name}@${entries.map(([k, v]) => `${k}=${v}`).join(',')}`;
 };
 
+/** A role instance object read back into the role and the resources it stands for. */
+export const parseInstance = (object: string): { role: string; resources: Record<string, string> } => {
+  const at = object.indexOf('@');
+  if (at < 0) return { role: object, resources: {} };
+  const resources: Record<string, string> = {};
+  for (const pair of object.slice(at + 1).split(',')) {
+    const eq = pair.indexOf('=');
+    if (eq > 0) resources[pair.slice(0, eq)] = pair.slice(eq + 1);
+  }
+  return { role: object.slice(0, at), resources };
+};
+
 const idsFor = (resourceName: string, named: ResourceSet): string[] => {
   const ids = Array.isArray(named) ? named : [named];
   return ids.map((id) => (id === ALL ? `${resourceName}/${TYPE_WIDE}` : `${resourceName}/${id}`));

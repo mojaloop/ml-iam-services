@@ -1,14 +1,9 @@
-import { mkdtempSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
-import { join } from 'node:path';
-
 import { compose, ComposedService } from '../../src/authzgen/compose';
 import { derive } from '../../src/authzgen/derive';
 import { CANONICAL_STUBS } from '../../src/authzgen/emit-model';
 import { ketoNamespace } from '../../src/authzgen/keto-name';
 import { CatalogPermission, ServiceBundle, ServiceCatalog } from '../../src/authzgen/types';
 import { indexCatalogs } from '../../src/iam/roles';
-import { readCatalogs } from '../../src/iam/server';
 
 const permission = (id: string, scopedBy: string[] = [], bound: string[] = []): CatalogPermission => ({
   id,
@@ -206,16 +201,14 @@ describe('a declared source', () => {
   });
 });
 
-describe('what the aggregator writes and the IAM reads', () => {
+describe('what the IAM reads from a composition', () => {
   it('offers every service of the composition by permission id', () => {
     const composition = compose([
       service('mcm', [permission('mcm.a'), permission('mcm.b')]),
       service('reports', [permission('reports.get')]),
     ]);
-    const file = join(mkdtempSync(join(tmpdir(), 'catalog-')), 'catalog.json');
-    writeFileSync(file, `${JSON.stringify(composition.catalog, null, 2)}\n`);
 
-    const index = indexCatalogs(readCatalogs([file]));
+    const index = indexCatalogs(composition.catalog);
     expect([...index.keys()].sort()).toEqual(['mcm.a', 'mcm.b', 'reports.get']);
   });
 });

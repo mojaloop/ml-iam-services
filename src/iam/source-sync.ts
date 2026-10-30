@@ -89,6 +89,8 @@ export interface SourceSyncOptions {
   keto: RegistryStore;
   intervalMs: number;
   fetchImpl?: typeof fetch;
+  /** Called after each source is read, with when. */
+  onSynced?: (resourceName: string, at: string) => void;
 }
 
 /**
@@ -106,6 +108,7 @@ export async function startSourceSync(options: SourceSyncOptions): Promise<{ sto
         if (added.length > 0 || removed.length > 0 || initial) {
           console.log(JSON.stringify({ event: 'source-sync', resourceName: target.resourceName, added, removed }));
         }
+        options.onSynced?.(target.resourceName, new Date().toISOString());
       } catch (error) {
         if (initial && error instanceof SourceShapeError) throw error;
         console.error(`source-sync ${target.resourceName}: ${(error as Error).message}`);

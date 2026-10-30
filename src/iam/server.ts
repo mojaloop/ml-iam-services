@@ -5,20 +5,29 @@ import { join } from 'node:path';
 
 import type { Context } from 'openapi-backend';
 import { OpenAPIBackend } from 'openapi-backend';
-import { parse as parseYaml } from 'yaml';
 
 import { accessRules, ResourceNames } from '../authzgen/compose';
 import { ketoNamespace } from '../authzgen/keto-name';
 import { ServiceCatalog } from '../authzgen/types';
+import {
+  AuthzResourceName,
+  listDocuments,
+  listResourceNames,
+  listRoles,
+  listSeparations,
+  setStatus,
+  watchRoles,
+} from '../operator/cluster';
 import { Operator } from '../operator/server';
-import { review, WEBHOOK_PATH } from '../operator/webhook';
+import { AdmissionContext, review, WEBHOOK_PATH } from '../operator/webhook';
 import { config } from './config';
 import { KetoWriter } from './keto';
-import { ROLE_NAMESPACE } from './materialize';
+import { MEMBERS, parseInstance, ROLE_NAMESPACE } from './materialize';
 import { ProvisionRequest } from './provision';
 import { Assignment, Provisioner } from './provisioner';
-import { Applied, applyRoles, report } from './reconcile';
-import { indexCatalogs, openResourceNames, readyRoles, RolesFile, validateRoles } from './roles';
+import { Applied } from './reconcile';
+import { RoleSync } from './role-sync';
+import { indexCatalogs, openResourceNames, RolesFile } from './roles';
 import { startSourceSync } from './source-sync';
 
 /** What a deployment has to offer: the permissions services advertise, and the roles composed from them. */
@@ -122,8 +131,8 @@ export async function buildHandler(
     getAccessRules: () => ({ status: 200, text: accessRules(offered.composed?.rules ?? {}) }),
     /**
      * What this process is working from: which catalog, which roles, the
-     * rules in force, and what applying them did. It answers "did this pod
-     * pick up the file I edited" and "which rule refused me", without anyone
+     * rules in force, and what applying them did. It answers "did the IAM
+     * pick up the role I applied" and "which rule refused me", without anyone
      * reading a pod log.
      */
     getState: () => ({
@@ -239,22 +248,17 @@ async function waitFor(url: string, name: string): Promise<void> {
 }
 
 export interface StartOptions {
-  roles: string;
-  /** Composed catalogs to read, for a run with no namespace to compose in. */
-  catalog?: string[];
   adminEmail?: string;
   /** Without one, a created admin is invited by email to set a password. */
   adminPassword?: string;
   adminRole?: string;
   kratosAdminUrl?: string;
   kratosPublicUrl?: string;
-  /** The namespace the composition is published into, when it runs in one. */
+  /** The namespace the composition is published into. */
   namespace?: string;
-  /** The deployment's names for one thing across services. */
-  resourceNames?: string;
   /** The ConfigMap the composed rules and catalog are published as. */
   publishAs?: string;
-  /** A directory holding tls.crt and tls.key, to answer AuthzDocument admission over HTTPS. */
+  /** A directory holding tls.crt and tls.key, to answer admission over HTTPS. */
   webhookCertDir?: string;
 }
 
@@ -264,10 +268,10 @@ const CERT_RELOAD_MS = 60_000;
 
 /**
  * Admission answers from the moment the process starts, before it waits on
- * Keto or the roles: a document applied while the IAM comes up must still be
- * checked, and the webhook refuses what it cannot reach.
+ * Keto or the composition: an object applied while the IAM comes up must
+ * still be checked, and the webhook refuses what it cannot check yet.
  */
-function startWebhook(dir: string): void {
+function startWebhook(dir: string, context: AdmissionContext): void {
   const read = () => ({ cert: readFileSync(join(dir, 'tls.crt')), key: readFileSync(join(dir, 'tls.key')) });
   const server = createHttpsServer(read(), (req, res) => {
     if (req.method !== 'POST' || req.url?.split('?')[0] !== WEBHOOK_PATH) {
@@ -275,7 +279,7 @@ function startWebhook(dir: string): void {
       return;
     }
     readBody(req)
-      .then((raw) => review(JSON.parse(raw)))
+      .then((raw) => review(JSON.parse(raw), context))
       .then((answer) => send(res, 200, answer))
       .catch((error) => send(res, 400, { error: String(error) }));
   });
@@ -286,109 +290,91 @@ function startWebhook(dir: string): void {
       console.error(JSON.stringify({ event: 'webhook-cert-reload-failed', error: String(error) }));
     }
   }, CERT_RELOAD_MS).unref();
-  server.listen(WEBHOOK_PORT, () => console.log(`AuthzDocument admission listening on port ${WEBHOOK_PORT}`));
+  server.listen(WEBHOOK_PORT, () => console.log(`Admission listening on port ${WEBHOOK_PORT}`));
 }
 
-/** Reads a composed catalog: every service of a deployment, per file. */
-export const readCatalogs = (paths: string[]): ServiceCatalog[] =>
-  paths.flatMap((p) => JSON.parse(readFileSync(p, 'utf8')) as ServiceCatalog[]);
+const stored: AdmissionContext['stored'] = async (kind) =>
+  kind === 'AuthzRole'
+    ? listRoles()
+    : kind === 'AuthzSeparation'
+      ? listSeparations()
+      : kind === 'AuthzResourceName'
+        ? listResourceNames()
+        : listDocuments();
 
 /**
- * The roles arrive as configuration, so the moment this starts is also the
- * moment they changed: applying them is the first thing it does, and it does
- * not answer a request until it has.
+ * The deployment's roles, separation rules and resource names are objects
+ * the IAM watches, so a change to any of them is applied in place, and each
+ * object says what became of it.
  */
 export async function start(options: StartOptions): Promise<void> {
-  if (options.webhookCertDir !== undefined) startWebhook(options.webhookCertDir);
-  const read = <T>(path: string): T => JSON.parse(readFileSync(path, 'utf8')) as T;
-  const roles = read<RolesFile>(options.roles);
-
-  // Keto's namespaces and the gateway's rules are published out of the
-  // composition, and are what those two read to start, so nothing below can
-  // wait on Keto until it exists. Its catalog is what the roles are checked
-  // against.
-  const names: ResourceNames =
-    options.resourceNames !== undefined
-      ? (parseYaml(readFileSync(options.resourceNames, 'utf8')) as ResourceNames)
-      : {};
-
-  const offered: Offered = { catalog: [], roles, names };
-  let operator: Operator | undefined;
-  let recomposed = Promise.resolve();
-  let composition: () => void = () => {};
-  const awaitComposition = (): void => {
-    recomposed = new Promise<void>((resolve) => {
-      composition = resolve;
-    });
-  };
-
-  if (options.namespace !== undefined) {
-    operator = new Operator({
-      namespace: options.namespace,
-      names,
-      ...(options.publishAs !== undefined ? { publishAs: options.publishAs } : {}),
-      onAccepted: (result) => {
-        if (result.composition !== undefined) {
-          offered.catalog = result.composition.catalog;
-          offered.composed = {
-            model: result.composition.model,
-            derivation: result.composition.derivation,
-            rules: result.composition.rules,
-          };
-        }
-        const services = result.composition?.catalog.map((c) => c.service) ?? [];
-        console.log(JSON.stringify({ event: 'composed', services, origins: result.origins }));
-        composition();
-      },
-    });
-    const first = await operator.start();
-    if (first.composition === undefined) {
-      console.error(`nothing composed:\n  ${first.problems.join('\n  ')}`);
-      process.exit(1);
-    }
-  } else {
-    offered.catalog = readCatalogs(options.catalog ?? []);
-  }
-
-  // The live roles must validate against the catalog before anything is
-  // applied or served: staying unready leaves the previous pod serving the
-  // previous policy. A role naming a service no route has brought yet waits,
-  // and goes live with the composition that brings it. A catalog read from
-  // files is the whole of it, so there a waiting role is a mismatch, and fatal.
-  awaitComposition();
-  const check = () => {
-    const ready = readyRoles(roles, offered.catalog);
-    const index = indexCatalogs(offered.catalog);
-    const problems = [...validateRoles(ready.file, index), ...(operator === undefined ? ready.pending : [])];
-    return { ready, index, problems };
-  };
-  let current = check();
-  while (current.problems.length > 0) {
-    if (operator === undefined) {
-      console.error(`${options.roles} does not match the catalog:\n  ${current.problems.join('\n  ')}`);
-      process.exit(1);
-    }
-    console.error(
-      `${options.roles} does not match the catalog, holding readiness for the documents that declare it:\n  ${current.problems.join('\n  ')}`,
-    );
-    await recomposed;
-    awaitComposition();
-    current = check();
-  }
-  offered.pending = current.ready.pending;
-  for (const line of current.ready.pending) console.log(`WAITING  ${line}`);
-
+  if (options.namespace === undefined) throw new Error('--namespace is required: the IAM composes in the cluster it runs in');
   const keto = new KetoWriter(config.ketoWriteUrl, config.ketoReadUrl);
-  await waitFor(`${config.ketoReadUrl}/health/ready`, 'keto');
-  for (const namespace of namespacesOf(current.ready.file)) await waitForModel(keto, namespace);
-  if (options.adminEmail !== undefined && options.kratosAdminUrl !== undefined) {
-    if (options.adminRole === undefined) {
-      throw new Error('--admin-role is required with --admin-email: the role is deployment configuration');
-    }
-    await waitFor(`${options.kratosAdminUrl}/health/ready`, 'kratos');
+  const offered: Offered = { catalog: [], roles: { roles: {} }, names: {} };
+  const provisioner = new Provisioner(keto, offered.roles, indexCatalogs(offered.catalog), offered.names);
+  let composed = false;
+  let applying = false;
+  let sync: { stop: () => void } | undefined;
+  let syncedAs: string | undefined;
+  const lastSync = new Map<string, string>();
+
+  const holders = async (role: string): Promise<number> =>
+    new Set(
+      (await keto.query({ namespace: ROLE_NAMESPACE, relation: MEMBERS }))
+        .filter((t) => parseInstance(t.object).role === role && t.subject_id !== undefined)
+        .map((t) => t.subject_id),
+    ).size;
+
+  if (options.webhookCertDir !== undefined) {
+    startWebhook(options.webhookCertDir, {
+      get catalog() {
+        return composed ? offered.catalog : undefined;
+      },
+      stored,
+      holders,
+    });
   }
 
-  const applied = await applyRoles(keto, current.ready.file, current.index, {
+  /** How many resources of each name exist, and when its source was last read. */
+  const reportCounts = async (): Promise<void> => {
+    for (const object of await listResourceNames()) {
+      const name = object.metadata?.name;
+      const namespace = object.metadata?.namespace;
+      if (name === undefined || namespace === undefined) continue;
+      const count = (await provisioner.resources(name)).length;
+      const at = lastSync.get(name);
+      if (object.status?.['resources'] === count && (at === undefined || object.status?.['lastSync'] === at)) continue;
+      await setStatus(AuthzResourceName, namespace, name, { resources: count, ...(at !== undefined ? { lastSync: at } : {}) }).catch(
+        (error) => console.error(JSON.stringify({ event: 'status-failed', object: `AuthzResourceName/${namespace}/${name}`, error: String(error) })),
+      );
+    }
+  };
+
+  /** The sources the resource names declare, read again whenever the names change. */
+  const syncSources = async (names: ResourceNames): Promise<void> => {
+    const signature = JSON.stringify(names);
+    if (signature === syncedAs) return;
+    syncedAs = signature;
+    sync?.stop();
+    sync = await startSourceSync({
+      names,
+      keto,
+      intervalMs: config.sourceSyncSeconds * 1000,
+      onSynced: (resourceName, at) => {
+        lastSync.set(resourceName, at);
+        void reportCounts();
+      },
+    }).catch((error) => {
+      console.error(JSON.stringify({ event: 'source-sync-refused', error: String(error) }));
+      return undefined;
+    });
+  };
+
+  const roles = new RoleSync({
+    keto,
+    catalog: () => offered.catalog,
+    ready: (namespace) => waitForModel(keto, namespace),
+    namespacesOf,
     ...(options.adminEmail !== undefined && options.adminRole !== undefined && options.kratosAdminUrl !== undefined
       ? {
         admin: {
@@ -400,50 +386,59 @@ export async function start(options: StartOptions): Promise<void> {
         },
       }
       : {}),
+    onApplied: (live, applied, pending) => {
+      provisioner.use(live, indexCatalogs(offered.catalog));
+      offered.roles = live;
+      offered.applied = applied;
+      offered.pending = pending;
+      for (const line of pending) console.log(`WAITING  ${line}`);
+    },
   });
-  for (const line of report(applied)) console.log(line);
 
-  const sync = await startSourceSync({
-    names,
-    keto,
-    intervalMs: config.sourceSyncSeconds * 1000,
-  });
-
-  const provisioner = new Provisioner(keto, current.ready.file, current.index, names);
-  offered.applied = applied;
-  const handler = await buildHandler(provisioner, offered);
-
-  // Every composition that changes which roles are live, or what their
-  // permissions are, applies them again, the way a restarted pod would.
-  if (operator !== undefined) {
-    const signature = (c: ReturnType<typeof check>) =>
-      JSON.stringify([Object.keys(c.ready.file.roles).sort(), offered.catalog]);
-    let appliedAs = signature(current);
-    void (async () => {
-      for (;;) {
-        await recomposed;
-        awaitComposition();
-        const next = check();
-        if (next.problems.length > 0) {
-          console.error(`${options.roles} does not match the new catalog, keeping the roles applied:\n  ${next.problems.join('\n  ')}`);
-          continue;
-        }
-        if (signature(next) === appliedAs) continue;
-        for (const namespace of namespacesOf(next.ready.file)) await waitForModel(keto, namespace);
-        const reapplied = await applyRoles(keto, next.ready.file, next.index);
-        for (const line of report(reapplied)) console.log(line);
-        for (const line of next.ready.pending) console.log(`WAITING  ${line}`);
-        provisioner.use(next.ready.file, next.index);
-        offered.applied = reapplied;
-        offered.pending = next.ready.pending;
-        appliedAs = signature(next);
+  const operator = new Operator({
+    namespace: options.namespace,
+    ...(options.publishAs !== undefined ? { publishAs: options.publishAs } : {}),
+    onAccepted: async (result, names) => {
+      if (result.composition !== undefined) {
+        offered.catalog = result.composition.catalog;
+        offered.composed = {
+          model: result.composition.model,
+          derivation: result.composition.derivation,
+          rules: result.composition.rules,
+        };
       }
-    })().catch((error) => {
-      console.error('Applying the roles to a new composition failed:', error);
-      process.exit(1);
-    });
+      offered.names = names;
+      composed = true;
+      provisioner.useNames(names);
+      console.log(JSON.stringify({ event: 'composed', services: offered.catalog.map((c) => c.service), origins: result.origins }));
+      if (applying) {
+        await syncSources(names);
+        roles.schedule();
+      }
+    },
+  });
+  const first = await operator.start();
+  if (first.composition === undefined) {
+    console.error(`nothing composed:\n  ${first.problems.join('\n  ')}`);
+    process.exit(1);
   }
 
+  await waitFor(`${config.ketoReadUrl}/health/ready`, 'keto');
+  await waitForModel(keto, ROLE_NAMESPACE);
+  if (options.adminEmail !== undefined && options.kratosAdminUrl !== undefined) {
+    if (options.adminRole === undefined) {
+      throw new Error('--admin-role is required with --admin-email: the role is deployment configuration');
+    }
+    await waitFor(`${options.kratosAdminUrl}/health/ready`, 'kratos');
+  }
+
+  applying = true;
+  await roles.run();
+  const watcher = await watchRoles(async () => roles.schedule());
+  await syncSources(offered.names ?? {});
+  await reportCounts();
+
+  const handler = await buildHandler(provisioner, offered);
   const server = createServer((req, res) => {
     handler(req, res).catch((error) => {
       console.error('Unhandled error:', error);
@@ -457,8 +452,9 @@ export async function start(options: StartOptions): Promise<void> {
   });
 
   const shutdown = (): void => {
-    sync.stop();
-    operator?.stop();
+    sync?.stop();
+    watcher.close();
+    operator.stop();
     server.close(() => process.exit(0));
   };
   process.on('SIGINT', shutdown);

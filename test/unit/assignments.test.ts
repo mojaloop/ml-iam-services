@@ -3,7 +3,8 @@ import { createServer } from 'node:http';
 import request from 'supertest';
 
 import { CatalogPermission, ServiceCatalog } from '../../src/authzgen/types';
-import { parseInstance, Provisioner } from '../../src/iam/provisioner';
+import { parseInstance } from '../../src/iam/materialize';
+import { Provisioner } from '../../src/iam/provisioner';
 import { EXISTS, RESOURCE_NAMESPACE } from '../../src/iam/registry';
 import { indexCatalogs, RolesFile } from '../../src/iam/roles';
 import { buildHandler } from '../../src/iam/server';
@@ -70,7 +71,7 @@ const separated: RolesFile = {
     mover: { grants: [{ permission: 'reports.moveFunds' }] },
     checker: { grants: [{ permission: 'reports.auditFunds' }] },
   },
-  exclusions: [{ name: 'four-eyes', a: ['reports.auditFunds'], b: ['reports.moveFunds'] }],
+  exclusions: [{ name: 'four-eyes', groups: [['reports.auditFunds'], ['reports.moveFunds']] }],
 };
 
 const setup = async () => {

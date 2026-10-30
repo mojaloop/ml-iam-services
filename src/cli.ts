@@ -37,11 +37,8 @@ program
 
 program
   .command('provisioning')
-  .description("Apply the deployment's roles, then serve the IAM the role UI and services call")
-  .requiredOption('-r, --roles <path>', 'path to the role document')
-  .option(
-    '-c, --catalog <path...>',
-    'composed catalogs to read, when it composes no namespace of its own',
+  .description(
+    "Keep the deployment's roles applied, and serve the IAM the role UI and services call",
   )
   .option(
     '--admin-email <email>',
@@ -65,9 +62,8 @@ program
     'namespace the composed rules and catalog are published into',
     process.env.POD_NAMESPACE,
   )
-  .option('--resource-names <path>', "the deployment's names for one thing across services")
   .option('--publish-as <name>', 'ConfigMap the composed rules and catalog are published as')
-  .option('--webhook-cert-dir <dir>', 'tls.crt and tls.key to answer AuthzDocument admission with')
+  .option('--webhook-cert-dir <dir>', 'tls.crt and tls.key to answer admission with')
   .action(startProvisioning);
 
 program.parse();

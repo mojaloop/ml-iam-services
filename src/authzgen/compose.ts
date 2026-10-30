@@ -112,7 +112,7 @@ const isPointer = (value: string): boolean => value === '' || value.startsWith('
  * id set. Everything the claim rests on is checkable here, and a claim that
  * does not hold is a sync that would write ids nothing can grant.
  */
-const sourceProblems = (label: string, name: ResourceName): string[] => {
+export const sourceProblems = (label: string, name: ResourceName): string[] => {
   const source = name.source;
   if (source === undefined) return [];
 

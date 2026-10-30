@@ -1,13 +1,17 @@
 import { accessRules, ResourceNames } from '../authzgen/compose';
+import { Verdict } from '../iam/conditions';
+import { claimNames, DeploymentObject, idOf, resourceNamesOf, writeStatus } from '../iam/objects';
 import {
   AuthzDocument,
+  AuthzResourceName,
   Gateway,
   listDocuments,
   listGateways,
+  listResourceNames,
   listRoutes,
   publish,
-  reportOn,
   reportOnRoute,
+  setStatus,
   watchInputs,
 } from './cluster';
 import { Declared, reconcile, Reconciled } from './reconcile';
@@ -16,21 +20,20 @@ import { AuthzDocumentResource, documentId, fromResource, ServedDocuments } from
 
 /**
  * Reads the deployment's routes, the documents their backends serve or name,
- * and publishes the composition. A prefix with a problem keeps its last good
- * rules while everything else moves on.
+ * and the resource names the deployment declares, and publishes the
+ * composition. A prefix with a problem keeps its last good rules while
+ * everything else moves on.
  */
 
 export interface OperatorOptions {
   /** The namespace the published files live in. */
   namespace: string;
-  /** What the deployment says its services' vocabularies have in common. */
-  names?: ResourceNames;
   /** The ConfigMap the gateway and Keto read. */
   publishAs?: string;
   /** How often served documents are read again, since a rollout changes them without touching a route. */
   refreshMs?: number;
-  /** Called with each accepted composition, for the IAM to serve. */
-  onAccepted?: (result: Reconciled) => void | Promise<void>;
+  /** Called with each accepted composition and the resource names it was composed against. */
+  onAccepted?: (result: Reconciled, names: ResourceNames) => void | Promise<void>;
 }
 
 const REFRESH_MS = 30_000;
@@ -112,8 +115,15 @@ export class Operator {
   }
 
   private async pass(): Promise<Reconciled> {
-    const [routes, resources, gateways] = await Promise.all([listRoutes(), listDocuments(), listGateways()]);
+    const [routes, resources, gateways, nameObjects] = await Promise.all([
+      listRoutes(),
+      listDocuments(),
+      listGateways(),
+      listResourceNames(),
+    ]);
     const byId = new Map(resources.map((r) => [documentId(r), r]));
+    const claimed = claimNames('AuthzResourceName', nameObjects);
+    const names = resourceNamesOf(claimed.owners);
 
     const backends: KeyedBackend[] = [];
     const claims: Claim[] = [];
@@ -161,12 +171,13 @@ export class Operator {
       }),
     );
 
-    const result = reconcile(declared, this.options.names ?? {}, { services: this.accepted?.services });
+    const result = reconcile(declared, names, { services: this.accepted?.services });
     const problems = [...routeProblems, ...result.problems];
     const reported = { ...result, problems };
 
     await this.report(routes, [...problems, ...unenforced]);
     await this.tell(resources, backends, refused, reported);
+    await this.tellNames(nameObjects, claimed.refused, reported);
     console.log(
       JSON.stringify({
         event: 'reconciled',
@@ -189,7 +200,7 @@ export class Operator {
         'keto-namespaces.ts': result.composition.model,
       });
     }
-    await this.options.onAccepted?.(reported);
+    await this.options.onAccepted?.(reported, names);
     return reported;
   }
 
@@ -213,30 +224,63 @@ export class Operator {
   ): Promise<void> {
     for (const resource of resources) {
       const id = documentId(resource);
-      const namespace = resource.metadata?.namespace;
-      const name = resource.metadata?.name;
-      if (namespace === undefined || name === undefined) continue;
-
       const readers = backends.filter((b) => `${b.routeNamespace}/${b.schema}` === id);
       const services = [...new Set(readers.map((b) => b.service))].sort();
       const failure = refused.get(id);
       const held = services.some((s) => result.held.includes(s));
-      const state =
-        failure !== undefined || held ? 'Refused' : readers.length === 0 ? 'Unreferenced' : 'Accepted';
-      const messages =
+      const verdict: Verdict =
         failure !== undefined
-          ? [failure]
+          ? { reason: 'Refused', message: failure }
           : held
-            ? result.problems.filter((p) => services.some((s) => p.startsWith(`${s} `) || p.includes(`AuthzDocument/${id}`)))
-            : [];
-
-      await reportOn(namespace, name, {
-        state,
-        ...(services.length > 0 ? { service: services.join(',') } : {}),
-        messages,
-        ...(resource.metadata?.generation !== undefined ? { observedGeneration: resource.metadata.generation } : {}),
-      }).catch(() => undefined);
+            ? {
+              reason: 'Refused',
+              message: result.problems
+                .filter((p) => services.some((s) => p.startsWith(`${s} `) || p.includes(`AuthzDocument/${id}`)))
+                .join('; '),
+            }
+            : readers.length === 0
+              ? { reason: 'Waiting', message: 'no route names it' }
+              : { reason: 'Accepted', message: `read as ${services.join(', ')}` };
+      await this.status(AuthzDocument, resource as DeploymentObject, verdict, {});
     }
+  }
+
+  /** Writes each resource name's fate back onto it: refused, waiting for the services it lists, or bound. */
+  private async tellNames(
+    objects: AuthzResourceName[],
+    duplicates: Map<AuthzResourceName, string>,
+    result: Reconciled,
+  ): Promise<void> {
+    const unbound = result.composition?.unbound ?? [];
+    for (const object of objects) {
+      const name = object.metadata?.name ?? '';
+      const mentions = (line: string) => line.startsWith(`resource name ${name} `) || line.startsWith(`resource name ${name}:`);
+      const problems = result.problems.filter(mentions);
+      const waiting = unbound.filter(mentions);
+      const members = object.spec?.members?.length ?? 0;
+      const verdict: Verdict = duplicates.has(object)
+        ? { reason: 'Refused', message: duplicates.get(object)! }
+        : problems.length > 0
+          ? { reason: 'Refused', message: problems.join('; ') }
+          : waiting.length === members && members > 0
+            ? { reason: 'Waiting', message: waiting.join('; ') }
+            : { reason: 'Accepted', message: [`${members - waiting.length} of ${members} members bound`, ...waiting].join('; ') };
+      await this.status(AuthzResourceName, object, verdict, {});
+    }
+  }
+
+  private async status(
+    model: typeof AuthzDocument | typeof AuthzResourceName,
+    object: DeploymentObject,
+    verdict: Verdict,
+    fields: Record<string, unknown>,
+  ): Promise<void> {
+    await writeStatus(object, verdict, fields, (namespace, name, status) => setStatus(model, namespace, name, status)).catch(
+      (error) =>
+        console.error(
+          JSON.stringify({ event: 'status-failed', object: idOf(model.name, object), error: String(error) }),
+        ),
+    );
   }
 }
 
