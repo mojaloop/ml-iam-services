@@ -1,4 +1,4 @@
-import { Configuration, RelationshipApi } from '@ory/client';
+import { Configuration, RelationshipApi, RelationshipPatch } from '@ory/client';
 
 import { MEMBERS, ROLE_NAMESPACE, Tuple } from './materialize';
 
@@ -29,31 +29,38 @@ export class KetoWriter {
     return tuples;
   }
 
-  /** Keto stores a second row for a tuple it already holds, so writing is delete-then-put. */
-  async put(tuple: Tuple): Promise<void> {
-    await this.deleteWhere(filterFor(tuple));
-    await this.writes.createRelationship({ createRelationshipBody: tuple });
-  }
-
-  async putAll(tuples: Tuple[]): Promise<void> {
-    for (const tuple of tuples) await this.put(tuple);
-  }
-
   /**
-   * Drops every grant a role instance holds, so writing its grants afterwards
-   * leaves exactly what the role document says. Without this a permission
-   * removed from a role would survive the next deploy.
+   * Applied whole or not at all: one tuple in a namespace the model lacks
+   * refuses the entire patch. A tuple both inserted and deleted in one patch
+   * ends up with no row, so a patch holding both is refused before it is sent.
    */
-  async clearGrantsOf(roleObject: string): Promise<void> {
+  async patch(inserts: Tuple[], deletes: Tuple[]): Promise<void> {
+    if (inserts.length === 0 && deletes.length === 0) return;
+    const deleting = new Set(deletes.map(describe));
+    const both = inserts.find((t) => deleting.has(describe(t)));
+    if (both !== undefined) throw new Error(`one patch inserts and deletes ${describe(both)}`);
+    await this.send([
+      ...deletes.map((relation_tuple) => ({ action: 'delete' as const, relation_tuple })),
+      ...inserts.map((relation_tuple) => ({ action: 'insert' as const, relation_tuple })),
+    ]);
+  }
+
+  protected async send(relationshipPatch: RelationshipPatch[]): Promise<void> {
+    await this.writes.patchRelationships({ relationshipPatch });
+  }
+
+  /** Keto writes a second row for a tuple it already holds, so a tuple is inserted only when absent. */
+  async put(tuple: Tuple): Promise<void> {
+    if ((await this.query(filterFor(tuple))).length === 0) await this.patch([tuple], []);
+  }
+
+  async grantsOf(roleObject: string, modelled: Set<string>): Promise<Tuple[]> {
     const held = await this.query({
       'subject_set.namespace': ROLE_NAMESPACE,
       'subject_set.object': roleObject,
       'subject_set.relation': MEMBERS,
     });
-    const modelled = new Set(await this.namespaces());
-    for (const tuple of held) {
-      if (modelled.has(tuple.namespace)) await this.deleteWhere(filterFor(tuple));
-    }
+    return held.filter((tuple) => modelled.has(tuple.namespace));
   }
 
   /** Removes every tuple matching a filter, which is how a role instance is retired. */
@@ -61,6 +68,15 @@ export class KetoWriter {
     await this.writes.deleteRelationships(asRequest(params));
   }
 }
+
+export const difference = (wanted: Tuple[], held: Tuple[]): { inserts: Tuple[]; deletes: Tuple[] } => {
+  const want = new Map(wanted.map((t) => [describe(t), t]));
+  const have = new Map(held.map((t) => [describe(t), t]));
+  return {
+    inserts: [...want].filter(([key]) => !have.has(key)).map(([, t]) => t),
+    deletes: [...have].filter(([key]) => !want.has(key)).map(([, t]) => t),
+  };
+};
 
 const asRequest = (params: Record<string, string>) => ({
   namespace: params['namespace'],

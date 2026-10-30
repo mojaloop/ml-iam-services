@@ -46,8 +46,7 @@ export const idsFrom = (body: unknown, target: SyncTarget): string[] => {
 
 interface RegistryStore {
   query(params: Record<string, string>): Promise<Tuple[]>;
-  putAll(tuples: Tuple[]): Promise<void>;
-  deleteWhere(params: Record<string, string>): Promise<void>;
+  patch(inserts: Tuple[], deletes: Tuple[]): Promise<void>;
 }
 
 /**
@@ -75,29 +74,14 @@ export async function syncTarget(
     if (parsed !== undefined && parsed.resourceName === target.resourceName) held.add(parsed.id);
   }
 
-  const added: string[] = [];
-  const removed: string[] = [];
-  const puts: Tuple[] = [];
-  for (const id of ids) {
-    if (!held.has(id)) {
-      puts.push(sourcedTuple(target.resourceName, id));
-      added.push(`${target.resourceName}/${id}`);
-    }
-  }
-  for (const id of held) {
-    if (!ids.has(id)) removed.push(`${target.resourceName}/${id}`);
-  }
-
-  await keto.putAll(puts);
-  for (const object of removed) {
-    await keto.deleteWhere({
-      namespace: RESOURCE_NAMESPACE,
-      object,
-      relation: EXISTS,
-      subject_id: SOURCED,
-    });
-  }
-  return { added: added.sort(), removed: removed.sort() };
+  const puts = [...ids].filter((id) => !held.has(id));
+  const gone = [...held].filter((id) => !ids.has(id));
+  await keto.patch(
+    puts.map((id) => sourcedTuple(target.resourceName, id)),
+    gone.map((id) => sourcedTuple(target.resourceName, id)),
+  );
+  const named = (id: string) => `${target.resourceName}/${id}`;
+  return { added: puts.map(named).sort(), removed: gone.map(named).sort() };
 }
 
 export interface SourceSyncOptions {

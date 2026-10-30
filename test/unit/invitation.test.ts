@@ -1,38 +1,9 @@
 import { createServer, IncomingMessage, Server } from 'node:http';
 import { AddressInfo } from 'node:net';
 
-import { KetoWriter } from '../../src/iam/keto';
-import { Tuple } from '../../src/iam/materialize';
 import { applyRoles } from '../../src/iam/reconcile';
 import { RolesFile } from '../../src/iam/roles';
-
-class MemoryKeto extends KetoWriter {
-  public tuples: Tuple[] = [];
-
-  constructor() {
-    super('http://keto-write-test', 'http://keto-read-test');
-  }
-
-  override async query(params: Record<string, string>): Promise<Tuple[]> {
-    return this.tuples.filter((t) =>
-      Object.entries(params).every(([key, value]) => {
-        if (key === 'subject_set.namespace') return t.subject_set?.namespace === value;
-        if (key === 'subject_set.object') return t.subject_set?.object === value;
-        if (key === 'subject_set.relation') return t.subject_set?.relation === value;
-        return (t as unknown as Record<string, unknown>)[key] === value;
-      }),
-    );
-  }
-
-  override async put(tuple: Tuple): Promise<void> {
-    this.tuples.push(tuple);
-  }
-
-  override async deleteWhere(params: Record<string, string>): Promise<void> {
-    const doomed = await this.query(params);
-    this.tuples = this.tuples.filter((t) => !doomed.includes(t));
-  }
-}
+import { MemoryKeto } from './memory-keto';
 
 interface Seen {
   method: string;

@@ -19,11 +19,9 @@ class FakeRegistry {
   async query(params: Record<string, string>): Promise<Tuple[]> {
     return this.tuples.filter((t) => params['subject_id'] === undefined || t.subject_id === params['subject_id']);
   }
-  async putAll(added: Tuple[]): Promise<void> {
-    this.tuples.push(...added);
-  }
-  async deleteWhere(params: Record<string, string>): Promise<void> {
-    this.tuples = this.tuples.filter((t) => !(t.object === params['object'] && t.subject_id === params['subject_id']));
+  async patch(inserts: Tuple[], deletes: Tuple[]): Promise<void> {
+    this.tuples.push(...inserts);
+    this.tuples = this.tuples.filter((t) => !deletes.some((d) => t.object === d.object && t.subject_id === d.subject_id));
   }
 }
 

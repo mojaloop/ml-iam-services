@@ -1,7 +1,7 @@
 import { ResourceNames } from '../authzgen/compose';
 import { broken, permissionsOf, rolesNamed } from './exclusions';
-import { KetoWriter } from './keto';
-import { materializeRole, MEMBERS, membership, ROLE_NAMESPACE,roleObject } from './materialize';
+import { difference, filterFor, KetoWriter } from './keto';
+import { materializeRole, MEMBERS, membership, ROLE_NAMESPACE, roleObject, Tuple } from './materialize';
 import { provision, ProvisionRequest } from './provision';
 import {
   EXISTS,
@@ -59,14 +59,8 @@ export class Provisioner {
   async provision(request: ProvisionRequest): Promise<{ problem?: string }> {
     const { problem } = this.declared(request.resourceName);
     if (problem !== undefined) return { problem };
-    await this.keto.putAll(provision(request.resourceName, request.id));
+    for (const tuple of provision(request.resourceName, request.id)) await this.keto.put(tuple);
     return {};
-  }
-
-  /** Members of a role instance, as subject ids. */
-  private async membersOf(object: string): Promise<string[]> {
-    const tuples = await this.keto.query({ namespace: ROLE_NAMESPACE, object, relation: MEMBERS });
-    return tuples.map((t) => t.subject_id).filter((id): id is string => id !== undefined);
   }
 
   /** The role instances that stand for this resource, read from what holds them. */
@@ -90,24 +84,23 @@ export class Provisioner {
     const { resourceName } = request;
 
     const instances = await this.instancesOf(resourceName, request.id);
+    const modelled = new Set(await this.keto.namespaces());
 
+    const retired: Tuple[] = [];
     const members = new Set<string>();
     for (const instance of instances) {
-      for (const subject of await this.membersOf(instance)) members.add(subject);
+      const memberships = await this.keto.query({ namespace: ROLE_NAMESPACE, object: instance, relation: MEMBERS });
+      for (const tuple of memberships) if (tuple.subject_id !== undefined) members.add(tuple.subject_id);
+      retired.push(...(await this.keto.grantsOf(instance, modelled)), ...memberships);
     }
-
-    for (const instance of instances) {
-      // The grants point at the instance's member set, so that subject set
-      // finds them all.
-      await this.keto.clearGrantsOf(instance);
-      await this.keto.deleteWhere({ namespace: ROLE_NAMESPACE, object: instance, relation: MEMBERS });
-    }
-
-    await this.keto.deleteWhere({
-      namespace: RESOURCE_NAMESPACE,
-      object: registryTuple(resourceName, request.id).object,
-      relation: EXISTS,
-    });
+    retired.push(
+      ...(await this.keto.query({
+        namespace: RESOURCE_NAMESPACE,
+        object: registryTuple(resourceName, request.id).object,
+        relation: EXISTS,
+      })),
+    );
+    await this.keto.patch([], difference([], retired).deletes);
 
     const orphaned: string[] = [];
     for (const subject of members) {
@@ -187,9 +180,14 @@ export class Provisioner {
   async assign(subject: string, assignment: Assignment): Promise<{ instance: string }> {
     const role = this.roles.roles[assignment.role]!;
     const object = roleObject(assignment.role, assignment.resources);
-    await this.keto.clearGrantsOf(object);
-    await this.keto.putAll(materializeRole(assignment.role, role, this.index, assignment.resources));
-    await this.keto.put(membership(assignment.role, subject, assignment.resources));
+    const modelled = new Set(await this.keto.namespaces());
+    const { inserts, deletes } = difference(
+      materializeRole(assignment.role, role, this.index, assignment.resources),
+      await this.keto.grantsOf(object, modelled),
+    );
+    const member = membership(assignment.role, subject, assignment.resources);
+    const absent = (await this.keto.query(filterFor(member))).length === 0;
+    await this.keto.patch([...inserts, ...(absent ? [member] : [])], deletes);
     return { instance: object };
   }
 

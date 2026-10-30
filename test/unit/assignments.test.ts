@@ -3,55 +3,15 @@ import { createServer } from 'node:http';
 import request from 'supertest';
 
 import { CatalogPermission, ServiceCatalog } from '../../src/authzgen/types';
-import { KetoWriter } from '../../src/iam/keto';
-import { Tuple } from '../../src/iam/materialize';
 import { parseInstance, Provisioner } from '../../src/iam/provisioner';
 import { EXISTS, RESOURCE_NAMESPACE } from '../../src/iam/registry';
 import { indexCatalogs, RolesFile } from '../../src/iam/roles';
 import { buildHandler } from '../../src/iam/server';
+import { MemoryKeto as KetoInMemory } from './memory-keto';
 
-/** A Keto that keeps tuples in memory and answers the filters the IAM uses. */
-class MemoryKeto extends KetoWriter {
-  public tuples: Tuple[] = [];
-
+class MemoryKeto extends KetoInMemory {
   constructor() {
-    super('http://keto-write-test', 'http://keto-read-test');
-  }
-
-  override async query(params: Record<string, string>): Promise<Tuple[]> {
-    return this.tuples.filter((t) =>
-      Object.entries(params).every(([key, value]) => {
-        if (key === 'subject_set.namespace') return t.subject_set?.namespace === value;
-        if (key === 'subject_set.object') return t.subject_set?.object === value;
-        if (key === 'subject_set.relation') return t.subject_set?.relation === value;
-        return (t as unknown as Record<string, unknown>)[key] === value;
-      }),
-    );
-  }
-
-  override async put(tuple: Tuple): Promise<void> {
-    await this.deleteWhere({
-      namespace: tuple.namespace,
-      object: tuple.object,
-      relation: tuple.relation,
-      ...(tuple.subject_id !== undefined
-        ? { subject_id: tuple.subject_id }
-        : {
-          'subject_set.namespace': tuple.subject_set!.namespace,
-          'subject_set.object': tuple.subject_set!.object,
-          'subject_set.relation': tuple.subject_set!.relation,
-        }),
-    });
-    this.tuples.push(tuple);
-  }
-
-  override async deleteWhere(params: Record<string, string>): Promise<void> {
-    const doomed = await this.query(params);
-    this.tuples = this.tuples.filter((t) => !doomed.includes(t));
-  }
-
-  override async namespaces(): Promise<string[]> {
-    return ['Role', 'Resource', 'reports'];
+    super(['Role', 'Resource', 'reports']);
   }
 }
 

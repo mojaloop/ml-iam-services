@@ -1,4 +1,4 @@
-import { filterFor,KetoWriter } from '../../src/iam/keto';
+import { difference, filterFor, KetoWriter } from '../../src/iam/keto';
 import { MEMBERS, ROLE_NAMESPACE, Tuple } from '../../src/iam/materialize';
 
 const KETO_WRITE_URL = process.env.KETO_WRITE_URL || 'http://localhost:4467';
@@ -45,7 +45,7 @@ describe('the Keto client against a running Keto', () => {
   });
 
   it('deletes exactly the tuple a filter names', async () => {
-    await keto.putAll([grant('writer-a', 'user-1'), grant('writer-a', 'user-2'), grant('writer-b', 'user-1')]);
+    await keto.patch([grant('writer-a', 'user-1'), grant('writer-a', 'user-2'), grant('writer-b', 'user-1')], []);
 
     await keto.deleteWhere(filterFor(grant('writer-a', 'user-1')));
 
@@ -56,12 +56,41 @@ describe('the Keto client against a running Keto', () => {
   });
 
   it('follows pagination to the end', async () => {
-    const subjects = Array.from({ length: 120 }, (_, i) => `user-${i}`);
-    await keto.putAll(subjects.map((s) => grant('writer-b', s)));
+    const subjects = Array.from({ length: 1200 }, (_, i) => `user-${i}`);
+    await keto.patch(subjects.map((s) => grant('writer-b', s)), []);
 
     const held = await keto.query({ namespace: NAMESPACE, object: 'writer-b', relation: MEMBERS });
 
-    expect(held).toHaveLength(120);
+    expect(held).toHaveLength(1200);
     expect(new Set(held.map((t) => t.subject_id))).toEqual(new Set(subjects));
+  });
+
+  it('applies a patch whole or not at all', async () => {
+    const stray: Tuple = { namespace: 'NoSuchNamespace', object: 'x', relation: MEMBERS, subject_id: 'user-1' };
+
+    await expect(keto.patch([grant('writer-a', 'user-1'), stray], [])).rejects.toThrow();
+
+    expect(await keto.query({ namespace: NAMESPACE, object: 'writer-a', relation: MEMBERS })).toEqual([]);
+  });
+
+  it('turns what is held into what is wanted in one patch', async () => {
+    await keto.patch([grant('writer-a', 'user-1'), grant('writer-a', 'user-2')], []);
+    const held = await keto.query({ namespace: NAMESPACE, object: 'writer-a', relation: MEMBERS });
+
+    const { inserts, deletes } = difference([grant('writer-a', 'user-2'), grant('writer-a', 'user-3')], held);
+    await keto.patch(inserts, deletes);
+
+    const after = await keto.query({ namespace: NAMESPACE, object: 'writer-a', relation: MEMBERS });
+    expect(after.map((t) => t.subject_id).sort()).toEqual(['user-2', 'user-3']);
+  });
+
+  it('refuses a patch that inserts and deletes one tuple, which Keto would leave with no row', async () => {
+    await keto.put(grant('writer-a', 'user-1'));
+
+    await expect(keto.patch([grant('writer-a', 'user-1')], [grant('writer-a', 'user-1')])).rejects.toThrow(
+      /inserts and deletes/,
+    );
+
+    expect(await keto.query({ namespace: NAMESPACE, object: 'writer-a', relation: MEMBERS })).toHaveLength(1);
   });
 });

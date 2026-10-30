@@ -1,8 +1,9 @@
 import { broken, heldRoles, permissionsOf, rolesNamed } from './exclusions';
-import { KetoWriter } from './keto';
+import { difference, filterFor, KetoWriter } from './keto';
 import { KratosAdmin } from './kratos';
 import { materialize, materializeRole, MEMBERS, membership, ROLE_NAMESPACE, Tuple } from './materialize';
 import { parseInstance } from './provisioner';
+import { RESOURCE_NAMESPACE } from './registry';
 import { openResourceNames, PermissionIndex, RolesFile } from './roles';
 
 /**
@@ -10,8 +11,10 @@ import { openResourceNames, PermissionIndex, RolesFile } from './roles';
  *
  * It runs when the service starts, which is also when the roles change: the
  * file arrives as configuration, so an edit rolls the pod and the pod applies
- * it. A role ends up holding exactly its document, whether the deployment named
- * that holding or a service provisioned it at runtime.
+ * it. Every grant a role's members hold ends up exactly what the live roles
+ * say, whether the deployment named that holding or a service provisioned it
+ * at runtime, and a role no longer live holds nothing. The whole change is one
+ * write, so no request ever meets a role half rewritten.
  *
  * It never removes a membership. Which people hold which roles is not the
  * file's business — a deployment ships defaults, an operator grants the rest,
@@ -19,10 +22,13 @@ import { openResourceNames, PermissionIndex, RolesFile } from './roles';
  * be the file quietly overruling them.
  */
 
+const NOT_GRANTS = new Set(['User', ROLE_NAMESPACE, RESOURCE_NAMESPACE]);
+
 export interface Applied {
   at: string;
   roles: number;
-  tuples: number;
+  inserted: number;
+  deleted: number;
   /** Role instances a service or an operator created, refreshed from the file. */
   instances: number;
   /** Holdings that break a rule the file now declares. */
@@ -56,6 +62,18 @@ async function runtimeInstances(
   return [...seen.values()];
 }
 
+/** Read before the memberships are, so an assignment landing in between is either seen whole or not touched. */
+async function heldGrants(keto: KetoWriter, modelled: string[]): Promise<Tuple[]> {
+  const held: Tuple[] = [];
+  for (const namespace of modelled.filter((n) => !NOT_GRANTS.has(n))) {
+    const tuples = await keto.query({ namespace });
+    held.push(
+      ...tuples.filter((t) => t.subject_set?.namespace === ROLE_NAMESPACE && t.subject_set.relation === MEMBERS),
+    );
+  }
+  return held;
+}
+
 export async function applyRoles(
   keto: KetoWriter,
   file: RolesFile,
@@ -77,15 +95,23 @@ export async function applyRoles(
     tuples.push(membership(options.admin.role, admin.id));
   }
 
+  const modelled = await keto.namespaces();
+  const held = await heldGrants(keto, modelled);
+
   const instances = await runtimeInstances(keto, file, index);
   for (const instance of instances) {
     tuples.push(...materializeRole(instance.role, file.roles[instance.role]!, index, instance.resources));
   }
 
-  for (const role of new Set(tuples.filter((t) => t.subject_set).map((t) => t.subject_set!.object))) {
-    await keto.clearGrantsOf(role);
+  const { inserts, deletes } = difference(
+    tuples.filter((t) => t.subject_set !== undefined),
+    held,
+  );
+  const memberships: Tuple[] = [];
+  for (const tuple of tuples.filter((t) => t.subject_id !== undefined)) {
+    if ((await keto.query(filterFor(tuple))).length === 0) memberships.push(tuple);
   }
-  await keto.putAll(tuples);
+  await keto.patch([...inserts, ...memberships], deletes);
 
   // Rules and holdings change at different times and only holdings pass
   // through a gate, so a rule added today meets combinations granted before it
@@ -101,7 +127,8 @@ export async function applyRoles(
   return {
     at: new Date().toISOString(),
     roles: Object.keys(file.roles).length,
-    tuples: tuples.length,
+    inserted: inserts.length,
+    deleted: deletes.length,
     instances: instances.length,
     findings,
     ...(options.admin !== undefined && admin !== undefined
@@ -118,6 +145,6 @@ export const report = (applied: Applied): string[] => [
           (applied.admin.invited ? ', invited by email' : ''),
     ]
     : []),
-  `Applied ${applied.roles} roles as ${applied.tuples} tuples, ${applied.instances} instances refreshed`,
+  `Applied ${applied.roles} roles: ${applied.inserted} grants written, ${applied.deleted} removed, ${applied.instances} instances refreshed`,
   ...applied.findings.map((f) => `ALREADY HELD  ${f}`),
 ];
