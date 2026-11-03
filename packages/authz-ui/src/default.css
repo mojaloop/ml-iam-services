@@ -633,7 +633,7 @@ button.authz-role__title:hover,
   top: calc(100% + 6px);
   left: 0;
   right: 0;
-  max-height: 320px;
+  max-height: min(560px, 70vh);
   overflow: auto;
   padding: 6px;
   background: var(--authz-surface);
@@ -643,12 +643,12 @@ button.authz-role__title:hover,
 }
 
 .authz-permission-picker__group-title {
-  padding: 8px 10px 4px;
-  font-size: 0.75em;
-  font-weight: 600;
+  padding: 12px 10px 4px;
+  font-size: 0.9em;
+  font-weight: 700;
   text-transform: uppercase;
   letter-spacing: 0.06em;
-  color: var(--authz-faint);
+  color: color-mix(in srgb, var(--authz-text) 85%, var(--authz-surface));
 }
 
 .authz-permission-picker__prefix {

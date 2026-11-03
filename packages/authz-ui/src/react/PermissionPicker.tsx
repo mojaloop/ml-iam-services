@@ -1,4 +1,4 @@
-import { type KeyboardEvent, useId, useMemo, useState } from 'react';
+import { type KeyboardEvent, useId, useLayoutEffect, useMemo, useRef, useState } from 'react';
 
 import type { CatalogPermission, ServiceCatalog } from '../client';
 import { Part } from '../styling';
@@ -11,6 +11,9 @@ export interface PermissionPickerProps {
   onPick(permission: string): void;
 }
 
+const MENU_MIN = 200;
+const MENU_MARGIN = 16;
+
 const matches = (query: string, service: ServiceCatalog, permission: CatalogPermission): boolean =>
   query === '' ||
   `${permission.summary ?? ''} ${permission.id} ${service.title} ${service.service}`.toLowerCase().includes(query);
@@ -22,6 +25,22 @@ export function PermissionPicker({ offered, onPick }: PermissionPickerProps) {
   const [open, setOpen] = useState(false);
   const [active, setActive] = useState(0);
   const ids = useId();
+  const menu = useRef<HTMLDivElement>(null);
+
+  useLayoutEffect(() => {
+    const list = menu.current;
+    if (!open || list === null) return undefined;
+    const fit = () => {
+      list.style.maxHeight = `${Math.max(MENU_MIN, window.innerHeight - list.getBoundingClientRect().top - MENU_MARGIN)}px`;
+    };
+    fit();
+    window.addEventListener('resize', fit);
+    window.addEventListener('scroll', fit, { capture: true, passive: true });
+    return () => {
+      window.removeEventListener('resize', fit);
+      window.removeEventListener('scroll', fit, { capture: true });
+    };
+  }, [open]);
 
   const groups = useMemo(() => {
     const wanted = query.trim().toLowerCase();
@@ -89,7 +108,13 @@ export function PermissionPicker({ offered, onPick }: PermissionPickerProps) {
         onKeyDown={onKeyDown}
       />
       {open && (
-        <div id={`${ids}-list`} className="authz-permission-picker__menu" role="listbox" aria-label={messages.addPermission}>
+        <div
+          ref={menu}
+          id={`${ids}-list`}
+          className="authz-permission-picker__menu"
+          role="listbox"
+          aria-label={messages.addPermission}
+        >
           {groups.length === 0 && <p className="authz-permission-picker__none">{messages.noPermissionMatches}</p>}
           {groups.map(({ service, permissions }) => (
             <div key={service.service} role="group" aria-label={service.title} className="authz-permission-picker__group">

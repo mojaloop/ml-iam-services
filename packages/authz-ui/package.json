@@ -1,6 +1,6 @@
 {
   "name": "@mojaloop/authz-ui",
-  "version": "0.3.1",
+  "version": "0.3.2",
   "description": "A typed client, React hooks and components for the IAM's public API, and custom elements any page can host",
   "license": "Apache-2.0",
   "author": "Yevhen Kyriukha <kirgene@gmail.com>",

@@ -111,6 +111,14 @@ describe('RoleEditor', () => {
     expect(within(offered).queryByRole('option', { name: /^Gives a subject a role/ })).toBeNull();
   });
 
+  it('lets the list of permissions run to the bottom of the window', async () => {
+    renderWithIam(<RoleEditor />, fakeIam(world));
+    await screen.findByLabelText('Name');
+    const offered = await openPicker();
+    const top = offered.getBoundingClientRect().top;
+    expect(offered.style.maxHeight).toBe(`${window.innerHeight - top - 16}px`);
+  });
+
   it('offers each permission once, since a role gives a permission with one reach', async () => {
     await compose();
     expect(within(await openPicker()).queryByRole('option', { name: /^Lists entries/ })).toBeNull();
