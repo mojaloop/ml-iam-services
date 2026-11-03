@@ -58,21 +58,23 @@ export function ResourcePicker({
     return (
       <fieldset className={classes} data-resource-name={resourceName} disabled={disabled}>
         <legend className="authz-resource-picker__label">{label(resourceName)}</legend>
-        {ids.map((resource) => (
-          <label key={resource} className="authz-resource-picker__option">
-            <input
-              type="checkbox"
-              part={Part.input}
-              checked={value.includes(resource)}
-              onChange={(event) =>
-                onChange(
-                  event.target.checked ? [...value, resource] : value.filter((chosen) => chosen !== resource),
-                )
-              }
-            />
-            {resource}
-          </label>
-        ))}
+        <div className="authz-chips">
+          {ids.map((resource) => (
+            <label key={resource} className="authz-chip">
+              <input
+                type="checkbox"
+                part={Part.input}
+                checked={value.includes(resource)}
+                onChange={(event) =>
+                  onChange(
+                    event.target.checked ? [...value, resource] : value.filter((chosen) => chosen !== resource),
+                  )
+                }
+              />
+              <span>{resource}</span>
+            </label>
+          ))}
+        </div>
         {stale}
       </fieldset>
     );

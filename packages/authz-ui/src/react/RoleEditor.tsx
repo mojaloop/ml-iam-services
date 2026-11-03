@@ -7,6 +7,7 @@ import { Part, parts } from '../styling';
 import { useAuthz, useLanguage } from './context';
 import { useCatalog, useCreateRole, useDeleteRole, useLiveComposition, useResourceNames, useUpdateRole } from './hooks';
 import { cx, Failure, Loading, useResourceNameLabel, useText } from './parts';
+import { PermissionPicker } from './PermissionPicker';
 import { ResourcePicker } from './ResourcePicker';
 
 /** What a grant says of one resource name: left to the assignment, every one, or the ones it names. */
@@ -108,7 +109,8 @@ export function RoleEditor({
   const remove = useDeleteRole();
   const [source, setSource] = useState(role?.name);
   const [draft, setDraft] = useState<Draft>(() => fromRole(role));
-  const [adding, setAdding] = useState('');
+  const [justAdded, setJustAdded] = useState<string>();
+  const [nameTouched, setNameTouched] = useState(false);
   const [confirming, setConfirming] = useState(false);
   const ids = useId();
 
@@ -132,16 +134,27 @@ export function RoleEditor({
   const locked = readOnly || ownedElsewhere;
   const saving = create.isPending || update.isPending;
 
-  const problems: string[] = [];
-  if (isNew && (!NAME.test(draft.name) || draft.name.length > NAME_MAX)) problems.push(messages.namePattern);
-  if (draft.grants.length === 0) problems.push(messages.noGrants);
-  for (const grant of draft.grants) {
-    for (const [name, scope] of Object.entries(grant.scopes)) {
-      if (scope.mode === Mode.some && scope.ids.length === 0) {
-        problems.push(`${grant.permission}: ${label(name)}: ${messages.chooseResource}`);
-      }
-    }
-  }
+  const nameProblem = !isNew
+    ? undefined
+    : draft.name === ''
+      ? messages.nameRequired
+      : !NAME.test(draft.name) || draft.name.length > NAME_MAX
+        ? messages.namePattern
+        : undefined;
+  const nameShown = nameProblem !== undefined && (draft.name !== '' || nameTouched);
+  const scopeProblem = (grant: GrantDraft, name: string): string | undefined => {
+    const scope = grant.scopes[name];
+    return scope?.mode === Mode.some && scope.ids.length === 0
+      ? messages.chooseAtLeastOne(label(name).toLowerCase())
+      : undefined;
+  };
+  const problems: string[] = [
+    ...(nameProblem !== undefined ? [nameProblem] : []),
+    ...(draft.grants.length === 0 ? [messages.noGrants] : []),
+    ...draft.grants.flatMap((grant) =>
+      Object.keys(grant.scopes).flatMap((name) => scopeProblem(grant, name) ?? []),
+    ),
+  ];
 
   const setGrant = (at: number, change: (grant: GrantDraft) => GrantDraft) =>
     setDraft((current) => ({
@@ -191,63 +204,112 @@ export function RoleEditor({
     >
       {ownedElsewhere && <p className="authz-role-editor__notice">{messages.readOnlyDeployment}</p>}
 
-      <div className="authz-field" part={Part.field}>
-        <label className="authz-field__label" part={Part.label} htmlFor={`${ids}-name`}>
-          {messages.name}
-        </label>
-        {isNew && !locked ? (
-          <input
-            id={`${ids}-name`}
-            className="authz-input"
-            part={Part.input}
-            value={draft.name}
-            maxLength={NAME_MAX}
-            required
-            aria-describedby={`${ids}-name-hint`}
-            onChange={(event) => setDraft((current) => ({ ...current, name: event.target.value }))}
-          />
-        ) : (
-          <code id={`${ids}-name`} className="authz-field__value">
-            {draft.name}
-          </code>
-        )}
-        {isNew && !locked && (
-          <span id={`${ids}-name-hint`} className="authz-field__hint">
-            {messages.namePattern}
-          </span>
-        )}
-      </div>
+      <section className="authz-role-editor__details">
+        <h3 className="authz-role-editor__heading" part={Part.heading}>
+          {messages.details}
+        </h3>
+        <div className="authz-field" part={Part.field}>
+          <label className="authz-field__label" part={Part.label} htmlFor={`${ids}-name`}>
+            {messages.name}
+          </label>
+          {isNew && !locked ? (
+            <input
+              id={`${ids}-name`}
+              className={cx('authz-input', 'authz-input--mono', nameShown && 'authz-input--invalid')}
+              part={Part.input}
+              value={draft.name}
+              maxLength={NAME_MAX}
+              required
+              aria-invalid={nameShown}
+              aria-describedby={`${ids}-name-hint`}
+              onBlur={() => setNameTouched(true)}
+              onChange={(event) => setDraft((current) => ({ ...current, name: event.target.value }))}
+            />
+          ) : (
+            <code id={`${ids}-name`} className="authz-field__value">
+              {draft.name}
+            </code>
+          )}
+          {isNew && !locked && (
+            <span
+              id={`${ids}-name-hint`}
+              className={cx('authz-field__hint', nameShown && 'authz-field__hint--problem')}
+            >
+              {nameShown ? nameProblem : messages.namePattern}
+            </span>
+          )}
+        </div>
 
-      {(['title', 'description'] as const).map((field) => (
-        <div key={field} className="authz-field" part={Part.field}>
-          <label className="authz-field__label" part={Part.label} htmlFor={`${ids}-${field}`}>
-            {messages[field]}
+        <div className="authz-field" part={Part.field}>
+          <label className="authz-field__label" part={Part.label} htmlFor={`${ids}-title`}>
+            {messages.title}
           </label>
           {locked ? (
-            <span id={`${ids}-${field}`} className="authz-field__value">
-              {text(draft[field])}
+            <span id={`${ids}-title`} className="authz-field__value">
+              {text(draft.title)}
             </span>
           ) : (
             <input
-              id={`${ids}-${field}`}
+              id={`${ids}-title`}
               className="authz-input"
               part={Part.input}
-              value={text(draft[field]) ?? ''}
+              value={text(draft.title) ?? ''}
+              onChange={(event) =>
+                setDraft((current) => ({ ...current, title: withText(current.title, event.target.value, resolvedLanguage) }))
+              }
+            />
+          )}
+        </div>
+
+        <div className="authz-field authz-field--wide" part={Part.field}>
+          <label className="authz-field__label" part={Part.label} htmlFor={`${ids}-description`}>
+            {messages.description}
+          </label>
+          {locked ? (
+            <span id={`${ids}-description`} className="authz-field__value">
+              {text(draft.description)}
+            </span>
+          ) : (
+            <textarea
+              id={`${ids}-description`}
+              className="authz-input authz-textarea"
+              part={Part.input}
+              placeholder={messages.descriptionPlaceholder}
+              value={text(draft.description) ?? ''}
               onChange={(event) =>
                 setDraft((current) => ({
                   ...current,
-                  [field]: withText(current[field], event.target.value, resolvedLanguage),
+                  description: withText(current.description, event.target.value, resolvedLanguage),
                 }))
               }
             />
           )}
         </div>
-      ))}
+      </section>
 
       <section className="authz-role-editor__grants">
-        <h3 className="authz-role-editor__heading" part={Part.heading}>
-          {messages.grants}
-        </h3>
+        <div className="authz-role-editor__grants-head">
+          <h3 className="authz-role-editor__heading" part={Part.heading}>
+            {messages.grants}
+          </h3>
+          <span className="authz-count" aria-hidden="true">
+            {draft.grants.length}
+          </span>
+          {!locked && (
+            <PermissionPicker
+              offered={offered}
+              onPick={(permission) => {
+                setDraft((current) => ({ ...current, grants: [{ permission, scopes: {} }, ...current.grants] }));
+                setJustAdded(permission);
+              }}
+            />
+          )}
+        </div>
+        {draft.grants.length === 0 && (
+          <p className="authz-empty authz-role-editor__no-grants" part={Part.empty}>
+            {messages.noGrants}
+          </p>
+        )}
         <ul className="authz-role-editor__grant-list" part={Part.list}>
           {draft.grants.map((grant, at) => {
             const offeredBy = index.get(grant.permission);
@@ -255,26 +317,46 @@ export function RoleEditor({
               ...(offeredBy !== undefined ? scopingResourceNames(offeredBy.permission) : []),
               ...Object.keys(grant.scopes),
             ].filter((name, i, all) => all.indexOf(name) === i);
+            const invalid = !locked && names.some((name) => scopeProblem(grant, name) !== undefined);
             return (
-              <li key={grant.permission} className="authz-grant" part={Part.grant} data-permission={grant.permission}>
+              <li
+                key={grant.permission}
+                className={cx(
+                  'authz-grant',
+                  invalid && 'authz-grant--invalid',
+                  grant.permission === justAdded && 'authz-grant--new',
+                )}
+                part={Part.grant}
+                data-permission={grant.permission}
+              >
                 <div className="authz-grant__head">
-                  <span className="authz-grant__label">{offeredBy?.permission.summary ?? grant.permission}</span>
-                  {offeredBy !== undefined && <span className="authz-grant__service">{offeredBy.service.title}</span>}
-                  <code className="authz-grant__id">{grant.permission}</code>
-                  {offeredBy?.permission.deprecated === true && (
-                    <span className="authz-grant__deprecated">{messages.deprecated}</span>
-                  )}
-                  {offeredBy === undefined && <span className="authz-grant__unknown">{messages.unknownPermission}</span>}
+                  <div className="authz-grant__text">
+                    <span className="authz-grant__label">{offeredBy?.permission.summary ?? grant.permission}</span>
+                    <div className="authz-grant__meta">
+                      {offeredBy !== undefined && <span className="authz-grant__service">{offeredBy.service.title}</span>}
+                      <code className="authz-grant__id">{grant.permission}</code>
+                      {offeredBy?.permission.deprecated === true && (
+                        <span className="authz-grant__deprecated">{messages.deprecated}</span>
+                      )}
+                      {offeredBy === undefined && (
+                        <span className="authz-grant__unknown">{messages.unknownPermission}</span>
+                      )}
+                    </div>
+                  </div>
                   {!locked && (
                     <button
                       type="button"
-                      className="authz-button authz-grant__remove"
+                      className="authz-icon-button authz-grant__remove"
                       part={Part.button}
+                      aria-label={messages.removeGrant}
+                      title={messages.removeGrant}
                       onClick={() =>
                         setDraft((current) => ({ ...current, grants: current.grants.filter((_, i) => i !== at) }))
                       }
                     >
-                      {messages.removeGrant}
+                      <svg width="14" height="14" viewBox="0 0 14 14" aria-hidden="true">
+                        <path d="M3 3l8 8M11 3l-8 8" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" />
+                      </svg>
                     </button>
                   )}
                 </div>
@@ -287,48 +369,70 @@ export function RoleEditor({
                     ...(nameable(name) ? [[Mode.some, messages.scopeSome] as [Mode, string]] : []),
                   ];
                   const group = `${ids}-${at}-${name}`;
+                  const resourceName = label(name).toLowerCase();
+                  const problem = scopeProblem(grant, name);
                   if (locked) {
                     return (
                       <div key={name} className="authz-scope" part={Part.scope} data-resource-name={name}>
                         <span className="authz-scope__name">{label(name)}</span>
-                        <span className="authz-scope__value">{describeScope(scope)}</span>
+                        <div className="authz-scope__body">
+                          <span className="authz-scope__value">{describeScope(scope)}</span>
+                        </div>
                       </div>
                     );
                   }
                   return (
                     <fieldset key={name} className="authz-scope" part={Part.scope} data-resource-name={name}>
                       <legend className="authz-scope__name">{label(name)}</legend>
-                      {modes.map(([value, caption]) => (
-                        <label key={value} className="authz-scope__option">
-                          <input
-                            type="radio"
-                            name={group}
-                            value={value}
-                            checked={mode === value}
-                            onChange={() =>
-                              setScope(
-                                at,
-                                name,
-                                value === Mode.open
-                                  ? undefined
-                                  : value === Mode.all
-                                    ? { mode: Mode.all }
-                                    : { mode: Mode.some, ids: scope?.mode === Mode.some ? scope.ids : [] },
-                              )
-                            }
+                      <div className="authz-scope__body">
+                        <div className="authz-segmented">
+                          {modes.map(([value, caption]) => (
+                            <label key={value} className="authz-segmented__option">
+                              <input
+                                type="radio"
+                                name={group}
+                                value={value}
+                                checked={mode === value}
+                                onChange={() =>
+                                  setScope(
+                                    at,
+                                    name,
+                                    value === Mode.open
+                                      ? undefined
+                                      : value === Mode.all
+                                        ? { mode: Mode.all }
+                                        : { mode: Mode.some, ids: scope?.mode === Mode.some ? scope.ids : [] },
+                                  )
+                                }
+                              />
+                              <span>{caption}</span>
+                            </label>
+                          ))}
+                        </div>
+                        {mode === Mode.open && (
+                          <span className="authz-scope__help">{messages.scopeOpenHelp(resourceName)}</span>
+                        )}
+                        {mode === Mode.all && (
+                          <span className="authz-scope__help">{messages.scopeAllHelp(resourceName)}</span>
+                        )}
+                        {scope?.mode === Mode.some && (
+                          <ResourcePicker
+                            multiple
+                            resourceName={name}
+                            language={language}
+                            value={scope.ids}
+                            onChange={(chosen) => setScope(at, name, { mode: Mode.some, ids: chosen })}
                           />
-                          {caption}
-                        </label>
-                      ))}
-                      {scope?.mode === Mode.some && (
-                        <ResourcePicker
-                          multiple
-                          resourceName={name}
-                          language={language}
-                          value={scope.ids}
-                          onChange={(chosen) => setScope(at, name, { mode: Mode.some, ids: chosen })}
-                        />
-                      )}
+                        )}
+                        {problem !== undefined && (
+                          <p className="authz-scope__problem" part={Part.problems}>
+                            <span className="authz-scope__problem-mark" aria-hidden="true">
+                              !
+                            </span>
+                            {problem}
+                          </p>
+                        )}
+                      </div>
                     </fieldset>
                   );
                 })}
@@ -336,93 +440,54 @@ export function RoleEditor({
             );
           })}
         </ul>
-
-        {!locked && (
-          <div className="authz-role-editor__add" part={Part.field}>
-            <label className="authz-field__label" part={Part.label} htmlFor={`${ids}-add`}>
-              {messages.permission}
-            </label>
-            <select
-              id={`${ids}-add`}
-              className="authz-select"
-              part={Part.input}
-              value={adding}
-              onChange={(event) => setAdding(event.target.value)}
-            >
-              <option value="" />
-              {offered.map(({ service, permissions }) => (
-                <optgroup key={service.service} label={service.title}>
-                  {permissions.map((permission) => (
-                    <option key={permission.id} value={permission.id}>
-                      {permission.summary ?? permission.id}
-                    </option>
-                  ))}
-                </optgroup>
-              ))}
-            </select>
-            <button
-              type="button"
-              className="authz-button"
-              part={Part.button}
-              disabled={adding === ''}
-              onClick={() => {
-                setDraft((current) => ({ ...current, grants: [...current.grants, { permission: adding, scopes: {} }] }));
-                setAdding('');
-              }}
-            >
-              {messages.addGrant}
-            </button>
-          </div>
-        )}
       </section>
 
-      {!locked && problems.length > 0 && (
-        <ul className="authz-role-editor__problems" part={Part.problems}>
-          {problems.map((problem, at) => (
-            <li key={at}>{problem}</li>
-          ))}
-        </ul>
-      )}
       {failure !== null && <Failure error={failure} />}
 
       <div className="authz-role-editor__actions" part={Part.actions}>
-        {!locked && (
-          <button
-            type="submit"
-            className="authz-button authz-button--primary"
-            part={parts(Part.button, Part.primary)}
-            disabled={problems.length > 0 || saving}
-          >
-            {isNew ? messages.create : messages.save}
-          </button>
-        )}
-        {onCancel !== undefined && (
-          <button type="button" className="authz-button" part={Part.button} onClick={onCancel}>
-            {messages.cancel}
-          </button>
-        )}
-        {allowDelete && !locked && !isNew && (
-          confirming ? (
-            <button
-              type="button"
-              className="authz-button authz-button--danger"
-              part={parts(Part.button, Part.danger)}
-              disabled={remove.isPending}
-              onClick={() => remove.mutate(role.name, { onSuccess: () => onDeleted?.(role.name) })}
-            >
-              {messages.confirmDelete}
+        <span className={cx('authz-role-editor__status', problems.length > 0 && 'authz-role-editor__status--problems')}>
+          {!locked && problems.length > 0 ? messages.problemsToFix(problems.length) : ''}
+        </span>
+        <div className="authz-role-editor__buttons">
+          {allowDelete &&
+            !locked &&
+            !isNew &&
+            (confirming ? (
+              <button
+                type="button"
+                className="authz-button authz-button--danger"
+                part={parts(Part.button, Part.danger)}
+                disabled={remove.isPending}
+                onClick={() => remove.mutate(role.name, { onSuccess: () => onDeleted?.(role.name) })}
+              >
+                {messages.confirmDelete}
+              </button>
+            ) : (
+              <button
+                type="button"
+                className="authz-button authz-button--danger"
+                part={parts(Part.button, Part.danger)}
+                onClick={() => setConfirming(true)}
+              >
+                {messages.deleteRole}
+              </button>
+            ))}
+          {onCancel !== undefined && (
+            <button type="button" className="authz-button" part={Part.button} onClick={onCancel}>
+              {messages.cancel}
             </button>
-          ) : (
+          )}
+          {!locked && (
             <button
-              type="button"
-              className="authz-button authz-button--danger"
-              part={parts(Part.button, Part.danger)}
-              onClick={() => setConfirming(true)}
+              type="submit"
+              className="authz-button authz-button--primary"
+              part={parts(Part.button, Part.primary)}
+              disabled={problems.length > 0 || saving}
             >
-              {messages.deleteRole}
+              {isNew ? messages.create : messages.save}
             </button>
-          )
-        )}
+          )}
+        </div>
       </div>
     </form>
   );

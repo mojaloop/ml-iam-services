@@ -53,14 +53,22 @@ describe('RoleList', () => {
 });
 
 describe('RoleEditor', () => {
+  const openPicker = async () => {
+    await userEvent.click(screen.getByRole('combobox', { name: 'Add a permission' }));
+    return screen.getByRole('listbox', { name: 'Add a permission' });
+  };
+
+  const addPermission = async (summary: string) => {
+    await userEvent.click(within(await openPicker()).getByRole('option', { name: new RegExp(`^${summary}`) }));
+  };
+
   const compose = async (beforeSave?: RoleEditorProps['beforeSave']) => {
     const iam = fakeIam({ ...world, 'POST /roles': ({ body }) => ({ status: 201, body: { ...(body as object), open: [], owner: 'iam' } }) });
     const onSaved = vi.fn();
     renderWithIam(<RoleEditor onSaved={onSaved} beforeSave={beforeSave} />, iam);
     await userEvent.type(await screen.findByLabelText('Name'), 'entry-reader');
     await userEvent.type(screen.getByLabelText('Title'), 'Entry reader');
-    await userEvent.selectOptions(screen.getByLabelText('Permission'), 'Lists entries');
-    await userEvent.click(screen.getByRole('button', { name: 'Add grant' }));
+    await addPermission('Lists entries');
     return { iam, onSaved };
   };
 
@@ -83,14 +91,47 @@ describe('RoleEditor', () => {
 
   it('offers the catalog by summary, leaving out deprecated permissions', async () => {
     renderWithIam(<RoleEditor />, fakeIam(world));
-    const add = await screen.findByLabelText('Permission');
-    expect(within(add).getByRole('option', { name: 'Lists entries' })).toBeInTheDocument();
-    expect(within(add).queryByRole('option', { name: 'Purges the ledger' })).toBeNull();
+    await screen.findByLabelText('Name');
+    const offered = await openPicker();
+    expect(within(offered).getByRole('option', { name: /^Lists entries/ })).toBeInTheDocument();
+    expect(within(offered).queryByRole('option', { name: /^Purges the ledger/ })).toBeNull();
+  });
+
+  it('finds a permission by what is typed, across summary, id and service', async () => {
+    renderWithIam(<RoleEditor />, fakeIam(world));
+    await screen.findByLabelText('Name');
+    const picker = screen.getByRole('combobox', { name: 'Add a permission' });
+    await userEvent.type(picker, 'assignRole');
+    const offered = screen.getByRole('listbox', { name: 'Add a permission' });
+    expect(within(offered).getByRole('option', { name: /^Gives a subject a role/ })).toBeInTheDocument();
+    expect(within(offered).queryByRole('option', { name: /^Lists entries/ })).toBeNull();
+    await userEvent.clear(picker);
+    await userEvent.type(picker, 'ledger');
+    expect(within(offered).getByRole('option', { name: /^Lists entries/ })).toBeInTheDocument();
+    expect(within(offered).queryByRole('option', { name: /^Gives a subject a role/ })).toBeNull();
   });
 
   it('offers each permission once, since a role gives a permission with one reach', async () => {
     await compose();
-    expect(within(screen.getByLabelText('Permission')).queryByRole('option', { name: 'Lists entries' })).toBeNull();
+    expect(within(await openPicker()).queryByRole('option', { name: /^Lists entries/ })).toBeNull();
+  });
+
+  it('checks the name as it is typed', async () => {
+    renderWithIam(<RoleEditor />, fakeIam(world));
+    const name = await screen.findByLabelText('Name');
+    expect(name).toHaveAttribute('aria-invalid', 'false');
+    await userEvent.type(name, 'Not Valid');
+    expect(name).toHaveAttribute('aria-invalid', 'true');
+    expect(name).toHaveAccessibleDescription(
+      'Lowercase letters, digits and "-", starting and ending with a letter or digit, at most 63',
+    );
+    await userEvent.clear(name);
+    await userEvent.type(name, 'entry-reader');
+    expect(name).toHaveAttribute('aria-invalid', 'false');
+    await userEvent.clear(name);
+    await userEvent.tab();
+    expect(name).toHaveAttribute('aria-invalid', 'true');
+    expect(name).toHaveAccessibleDescription('Name the role');
   });
 
   it('composes a role whose grant leaves its resource name open for the assignment', async () => {
@@ -118,15 +159,17 @@ describe('RoleEditor', () => {
 
   it('names the ids chosen of the IAM’s own resource names', async () => {
     const { iam, onSaved } = await compose();
-    await userEvent.selectOptions(screen.getByLabelText('Permission'), 'Gives a subject a role');
-    await userEvent.click(screen.getByRole('button', { name: 'Add grant' }));
+    await addPermission('Gives a subject a role');
     const scope = screen.getByRole('group', { name: 'Role' });
     await userEvent.click(within(scope).getByLabelText('Specific'));
+    expect(within(scope).getByText('Choose at least one role')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Create role' })).toBeDisabled();
     await userEvent.click(await within(scope).findByLabelText('reader'));
+    expect(within(scope).queryByText('Choose at least one role')).toBeNull();
     await userEvent.click(screen.getByRole('button', { name: 'Create role' }));
     await waitFor(() => expect(onSaved).toHaveBeenCalledTimes(1));
     expect(iam.of('POST', '/roles')[0]?.body).toMatchObject({
-      grants: [{ permission: 'ledger.listEntries' }, { permission: 'iam.assignRole', resources: { role: ['reader'] } }],
+      grants: [{ permission: 'iam.assignRole', resources: { role: ['reader'] } }, { permission: 'ledger.listEntries' }],
     });
   });
 
@@ -170,8 +213,7 @@ describe('RoleEditor', () => {
     const iam = fakeIam({ ...world, 'POST /roles': { status: 422, body: { errors: ['you do not hold ledger.listEntries'] } } });
     renderWithIam(<RoleEditor />, iam);
     await userEvent.type(await screen.findByLabelText('Name'), 'entry-reader');
-    await userEvent.selectOptions(screen.getByLabelText('Permission'), 'Lists entries');
-    await userEvent.click(screen.getByRole('button', { name: 'Add grant' }));
+    await addPermission('Lists entries');
     await userEvent.click(screen.getByRole('button', { name: 'Create role' }));
     expect(await screen.findByRole('alert')).toHaveTextContent('you do not hold ledger.listEntries');
   });

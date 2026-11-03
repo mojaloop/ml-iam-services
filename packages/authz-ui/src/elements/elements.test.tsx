@@ -220,8 +220,8 @@ describe('changes', () => {
   const composeEntryReader = async (element: Element) => {
     const view = inside(element);
     fireEvent.change(await view.findByLabelText('Name'), { target: { value: 'entry-reader' } });
-    await userEvent.selectOptions(view.getByLabelText('Permission'), 'Lists entries');
-    await userEvent.click(view.getByRole('button', { name: 'Add grant' }));
+    await userEvent.click(view.getByRole('combobox', { name: 'Add a permission' }));
+    await userEvent.click(view.getByRole('option', { name: /^Lists entries/ }));
     await userEvent.click(view.getByRole('button', { name: 'Create role' }));
   };
 

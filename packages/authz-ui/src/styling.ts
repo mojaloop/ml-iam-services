@@ -37,6 +37,7 @@ export const parts = (...names: Array<Part | false | undefined>): string => name
  */
 export const CssVar = {
   font: '--iam-font',
+  mono: '--iam-mono',
   text: '--iam-text',
   muted: '--iam-muted',
   surface: '--iam-surface',
