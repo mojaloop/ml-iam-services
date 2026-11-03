@@ -40,7 +40,7 @@ test('an empty scope is the none sentinel, not an empty string', () => {
 });
 
 test('renders the shapes the guard reads on the wire', () => {
-  assert.equal(formatScope(scope([['orders', { all: true, ids: [] }]])), 'orders=*');
+  assert.equal(formatScope(scope([['orders', { all: true, ids: [] }]])), 'orders=$all');
   assert.equal(formatScope(scope([['orders', { all: false, ids: ['o7', 'o11'] }]])), 'orders=o7,o11');
   assert.equal(
     formatScope(
@@ -49,8 +49,12 @@ test('renders the shapes the guard reads on the wire', () => {
         ['orders', { all: true, ids: [] }],
       ]),
     ),
-    'customers=acme;orders=*',
+    'customers=acme;orders=$all',
   );
+});
+
+test('reads a star as an id like any other, since only $all means every resource', () => {
+  assert.deepEqual(idsInScope(parseScope({ 'x-scope': 'orders=*' }), 'orders'), ['*']);
 });
 
 test('an unreadable header shows nothing rather than everything', () => {
@@ -64,12 +68,12 @@ test('a type in the header but empty shows nothing', () => {
 });
 
 test('a wildcard is no restriction, an absent type is no rows', () => {
-  assert.equal(idsInScope(parseScope({ 'x-scope': 'orders=*' }), 'orders'), undefined);
+  assert.equal(idsInScope(parseScope({ 'x-scope': 'orders=$all' }), 'orders'), undefined);
   assert.deepEqual(idsInScope(parseScope({ 'x-scope': 'customers=acme' }), 'orders'), []);
 });
 
 test('undefined ids and an empty list are not the same answer', () => {
-  const unrestricted = idsInScope(parseScope({ 'x-scope': 'orders=*' }), 'orders');
+  const unrestricted = idsInScope(parseScope({ 'x-scope': 'orders=$all' }), 'orders');
   const nothing = idsInScope(parseScope({ 'x-scope': 'orders=' }), 'orders');
   assert.equal(unrestricted, undefined);
   assert.deepEqual(nothing, []);

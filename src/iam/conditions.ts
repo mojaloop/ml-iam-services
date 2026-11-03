@@ -4,16 +4,22 @@
  * it.
  */
 
+const READY = 'Ready';
+
+export const Status = { true: 'True', false: 'False', unknown: 'Unknown' } as const;
+export type Status = (typeof Status)[keyof typeof Status];
+
 export interface Condition {
   type: string;
-  status: 'True' | 'False' | 'Unknown';
+  status: Status;
   reason: string;
   message?: string;
   observedGeneration?: number;
   lastTransitionTime: string;
 }
 
-export type Reason = 'Accepted' | 'Refused' | 'Waiting';
+export const Reason = { accepted: 'Accepted', refused: 'Refused', waiting: 'Waiting' } as const;
+export type Reason = (typeof Reason)[keyof typeof Reason];
 
 export interface Verdict {
   reason: Reason;
@@ -27,10 +33,10 @@ export const readyCondition = (
   generation: number | undefined,
   now: string = new Date().toISOString(),
 ): Condition => {
-  const status = verdict.reason === 'Accepted' ? 'True' : 'False';
-  const before = previous?.find((c) => c.type === 'Ready');
+  const status = verdict.reason === Reason.accepted ? Status.true : Status.false;
+  const before = previous?.find((c) => c.type === READY);
   return {
-    type: 'Ready',
+    type: READY,
     status,
     reason: verdict.reason,
     message: verdict.message,

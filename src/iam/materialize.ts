@@ -1,5 +1,8 @@
 import { ketoNamespace } from '../authzgen/keto-name';
-import { ALL, grantResources, openResourceNames, PermissionIndex, ResourceSet, RoleDocument, RolesFile } from './roles';
+import { serviceOf } from '../authzgen/permission';
+import { ALL, AUTHENTICATED, SINGLETON } from '../authzgen/reserved';
+import { resourceObject } from './registry';
+import { grantResources, openResourceNames, PermissionIndex, ResourceSet, RoleDocument, RolesFile } from './roles';
 
 /**
  * Role documents in, Keto tuples out. Pure, because this is the one place the
@@ -8,8 +11,18 @@ import { ALL, grantResources, openResourceNames, PermissionIndex, ResourceSet, R
 
 export const ROLE_NAMESPACE = 'Role';
 export const MEMBERS = 'members';
-export const SINGLETON = '__self__';
-export const TYPE_WIDE = '__all__';
+export { AUTHENTICATED, SINGLETON } from '../authzgen/reserved';
+/** The object a grant over every resource of a name is written to. */
+export const TYPE_WIDE = ALL;
+/** `Role:<role>#heldBy@$authenticated` marks a role every authenticated subject holds. */
+export const HELD_BY = 'heldBy';
+
+export const heldByMarker = (role: string): Tuple => ({
+  namespace: ROLE_NAMESPACE,
+  object: role,
+  relation: HELD_BY,
+  subject_id: AUTHENTICATED,
+});
 
 export interface SubjectSet {
   namespace: string;
@@ -30,27 +43,30 @@ export interface Tuple {
  * because its grants point at different resources. The resources are in the
  * object id so a membership edge names exactly one of them.
  */
+/** How an instance object writes its resources: `<role>@<name>=<id>,<name>=<id>`. No role name, resource name or id holds one. */
+const Instance = { resources: '@', between: ',', is: '=' } as const;
+
 export const roleObject = (name: string, resources: Record<string, string> = {}): string => {
   const entries = Object.entries(resources).sort(([a], [b]) => a.localeCompare(b));
-  return entries.length === 0 ? name : `${name}@${entries.map(([k, v]) => `${k}=${v}`).join(',')}`;
+  return entries.length === 0
+    ? name
+    : `${name}${Instance.resources}${entries.map(([k, v]) => `${k}${Instance.is}${v}`).join(Instance.between)}`;
 };
 
 /** A role instance object read back into the role and the resources it stands for. */
 export const parseInstance = (object: string): { role: string; resources: Record<string, string> } => {
-  const at = object.indexOf('@');
+  const at = object.indexOf(Instance.resources);
   if (at < 0) return { role: object, resources: {} };
   const resources: Record<string, string> = {};
-  for (const pair of object.slice(at + 1).split(',')) {
-    const eq = pair.indexOf('=');
-    if (eq > 0) resources[pair.slice(0, eq)] = pair.slice(eq + 1);
+  for (const pair of object.slice(at + Instance.resources.length).split(Instance.between)) {
+    const eq = pair.indexOf(Instance.is);
+    if (eq > 0) resources[pair.slice(0, eq)] = pair.slice(eq + Instance.is.length);
   }
   return { role: object.slice(0, at), resources };
 };
 
-const idsFor = (resourceName: string, named: ResourceSet): string[] => {
-  const ids = Array.isArray(named) ? named : [named];
-  return ids.map((id) => (id === ALL ? `${resourceName}/${TYPE_WIDE}` : `${resourceName}/${id}`));
-};
+const idsFor = (resourceName: string, named: ResourceSet): string[] =>
+  (Array.isArray(named) ? named : [named]).map((id) => resourceObject(resourceName, id === ALL ? TYPE_WIDE : id));
 
 export function materializeRole(
   name: string,
@@ -58,26 +74,22 @@ export function materializeRole(
   index: PermissionIndex,
   resources: Record<string, string> = {},
 ): Tuple[] {
-  const subject_set: SubjectSet = {
-    namespace: ROLE_NAMESPACE,
-    object: roleObject(name, resources),
-    relation: MEMBERS,
-  };
+  const subject_set: SubjectSet = { namespace: ROLE_NAMESPACE, object: roleObject(name, resources), relation: MEMBERS };
   const seen = new Set<string>();
   const tuples: Tuple[] = [];
 
   for (const grant of role.grants) {
     const permission = index.get(grant.permission)!;
-    const namespace = ketoNamespace(grant.permission.split('.')[0]!);
+    const namespace = ketoNamespace(serviceOf(grant.permission));
     const named = grantResources(grant, permission);
+    const followed = new Set(permission.followsAssignment ?? []);
 
     const objectsOf = (type: string): string[] => {
       const resourceName = permission.resourceNames[type];
       const set = resourceName === undefined ? undefined : (named.get(resourceName) ?? resources[resourceName]);
-      if (resourceName === undefined || set === undefined) {
-        throw new Error(`${name}: ${grant.permission} leaves ${type} unresolved`);
-      }
-      return idsFor(resourceName, set);
+      if (resourceName !== undefined && set !== undefined) return idsFor(resourceName, set);
+      if (followed.has(type)) return [];
+      throw new Error(`${name}: ${grant.permission} leaves ${type} unresolved`);
     };
 
     // The first group is what the gateway checks: the singleton when the

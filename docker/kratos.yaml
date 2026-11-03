@@ -12,11 +12,20 @@ serve:
 
 selfservice:
   default_browser_return_url: http://localhost:4455/
+  methods:
+    link:
+      enabled: true
   flows:
     registration:
       ui_url: http://localhost:4455/registration
     login:
       ui_url: http://localhost:4455/login
+    recovery:
+      enabled: true
+      use: link
+      ui_url: http://localhost:4455/recovery
+    settings:
+      ui_url: http://localhost:4455/settings
 
 identity:
   default_schema_id: default

@@ -1,9 +1,10 @@
 import { isDeepStrictEqual } from 'node:util';
 
 import { ResourceName, ResourceNames } from '../authzgen/compose';
+import { describeObject, refOf } from '../authzgen/problem';
 import { readyCondition, Verdict } from './conditions';
-import { Exclusion } from './exclusions';
-import { RoleDocument, RolesFile } from './roles';
+import { Exclusion, Within } from './exclusions';
+import { HeldBy, RoleDocument, RolesFile } from './roles';
 
 /**
  * The deployment's data as it arrives: one Kubernetes object per role,
@@ -23,8 +24,7 @@ export interface DeploymentObject {
   status?: { conditions?: Parameters<typeof readyCondition>[0]; [field: string]: unknown };
 }
 
-export const idOf = (kind: string, object: DeploymentObject): string =>
-  `${kind}/${object.metadata?.namespace ?? 'default'}/${object.metadata?.name ?? '(unnamed)'}`;
+export const idOf = (kind: string, object: DeploymentObject): string => `${kind}/${describeObject(refOf(object.metadata))}`;
 
 const createdAt = (object: DeploymentObject): string => {
   const at = object.metadata?.creationTimestamp;
@@ -40,9 +40,14 @@ export function claimNames<T extends DeploymentObject>(
   kind: string,
   objects: T[],
 ): { owners: T[]; refused: Map<T, string> } {
-  const ordered = [...objects].sort(
-    (a, b) => createdAt(a).localeCompare(createdAt(b)) || idOf(kind, a).localeCompare(idOf(kind, b)),
-  );
+  const ordered = [...objects].sort((a, b) => {
+    const [first, second] = [refOf(a.metadata), refOf(b.metadata)];
+    return (
+      createdAt(a).localeCompare(createdAt(b)) ||
+      first.namespace.localeCompare(second.namespace) ||
+      first.name.localeCompare(second.name)
+    );
+  });
   const owners = new Map<string, T>();
   const refused = new Map<T, string>();
   for (const object of ordered) {
@@ -55,17 +60,15 @@ export function claimNames<T extends DeploymentObject>(
 }
 
 export interface RoleSpec {
-  heldBy?: 'authenticated';
+  heldBy?: HeldBy;
   grants?: RoleDocument['grants'];
 }
 
 export interface SeparationSpec {
-  within?: 'subject' | 'resource';
+  within?: Within;
   resourceName?: string;
   groups?: string[][];
 }
-
-export const HELD_BY_UNAPPLIED = 'the decision does not yet answer for a role every signed-in subject holds';
 
 export const roleOf = (spec: RoleSpec | undefined): RoleDocument => ({
   grants: spec?.grants ?? [],
@@ -75,7 +78,7 @@ export const roleOf = (spec: RoleSpec | undefined): RoleDocument => ({
 export const exclusionOf = (name: string, spec: SeparationSpec | undefined): Exclusion => ({
   name,
   groups: spec?.groups ?? [],
-  within: spec?.within ?? 'subject',
+  within: spec?.within ?? Within.subject,
   ...(spec?.resourceName !== undefined ? { resourceName: spec.resourceName } : {}),
 });
 

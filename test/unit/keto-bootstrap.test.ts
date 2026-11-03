@@ -1,6 +1,6 @@
+import { waitForModel } from '../../src/controller/server';
 import { KetoWriter } from '../../src/iam/keto';
 import { ROLE_NAMESPACE } from '../../src/iam/materialize';
-import { waitForModel } from '../../src/iam/server';
 
 const holding = (keto: KetoWriter, answers: string[][]): string[][] => {
   const remaining = [...answers];
@@ -40,7 +40,7 @@ describe('applying roles before Keto has read the model', () => {
     const keto = new KetoWriter('http://keto-write', 'http://keto-read');
     const grant = (namespace: string) => ({
       namespace,
-      object: '__self__',
+      object: '$self',
       relation: 'view',
       subject_set: { namespace: ROLE_NAMESPACE, object: 'intapi-client', relation: 'members' },
     });

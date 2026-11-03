@@ -1,4 +1,5 @@
-import { Declared, reconcile } from '../../src/operator/reconcile';
+import { messagesOf, ObjectRef } from '../../src/authzgen/problem';
+import { Declared, DocumentSource, reconcile } from '../../src/operator/reconcile';
 import { Reach } from '../../src/operator/routes';
 import { fromResource } from '../../src/operator/sources';
 
@@ -39,23 +40,29 @@ const declared = (
   service: string,
   paths: string[],
   options: {
-    backend?: string;
-    source?: string;
+    backend?: ObjectRef;
+    source?: DocumentSource;
     hosts?: string[];
     reaches?: Reach[];
     exclude?: string[];
     scopedBy?: string[];
   } = {},
-): Declared => ({
-  origin: `HTTPRoute/${service}/api → ${options.backend ?? `${service}/${service}-api`}`,
-  service,
-  backend: options.backend ?? `${service}/${service}-api`,
-  source: options.source ?? `http://${options.backend ?? `${service}/${service}-api`}/.authz/openapi`,
-  document: document(service, paths, options.scopedBy),
-  hosts: options.hosts ?? [`${service}.test`],
-  reaches: options.reaches ?? [everything],
-  exclude: options.exclude ?? [],
-});
+): Declared => {
+  const backend = options.backend ?? { namespace: service, name: `${service}-api` };
+  return {
+    origin: `HTTPRoute/${service}/api → ${backend.namespace}/${backend.name}`,
+    service,
+    route: { namespace: service, name: 'api' },
+    backend,
+    source: options.source ?? { url: `http://${backend.name}.${backend.namespace}.svc/.authz/openapi` },
+    document: document(service, paths, options.scopedBy),
+    hosts: options.hosts ?? [`${service}.test`],
+    reaches: options.reaches ?? [everything],
+    exclude: options.exclude ?? [],
+  };
+};
+
+const urlsOf = (rules: Array<{ match: { url: string } }> | undefined): string[] => (rules ?? []).map((r) => r.match.url);
 
 const naming = (...members: Array<{ service: string; type: string }>) => ({
   resourceNames: Object.fromEntries(members.map((m) => [`${m.service}-${m.type}`, { label: m.type, members: [m] }])),
@@ -74,6 +81,15 @@ describe('reconciling what the routes key', () => {
     expect(result.held).toEqual([]);
     expect(result.composition?.catalog.map((c) => c.service)).toEqual(['alpha', 'beta']);
     expect(Object.keys(result.composition?.rules ?? {})).toEqual(['alpha', 'beta']);
+  });
+
+  it('tells the IAM its own callers, and no service', () => {
+    const result = reconcile([declared('alpha', ['/widgets/{widgetId}']), declared('iam', ['/roles'])], widgets, undefined, 'iam');
+    expect(result.problems).toEqual([]);
+    const handlers = (service: string) =>
+      result.services[service]!.rules.filter((r) => !r.id.endsWith('.preflight')).flatMap((r) => r.mutators.map((m) => m.handler));
+    expect(handlers('iam')).toEqual(['header']);
+    expect(handlers('alpha')).toEqual(['noop']);
   });
 
   it('combines the routes that send traffic to one backend under one prefix', () => {
@@ -105,7 +121,7 @@ describe('reconciling what the routes key', () => {
       widgets,
     );
     expect(result.composition?.catalog[0]?.permissions.map((p) => p.id)).toEqual(['alpha.getwidgets']);
-    expect(result.composition?.rules.alpha).not.toContain('gadgets');
+    expect(urlsOf(result.composition?.rules.alpha).some((url) => url.includes('gadgets'))).toBe(false);
   });
 
   /**
@@ -121,7 +137,7 @@ describe('reconciling what the routes key', () => {
     });
     const behind = (service: string, prefixes: string[], exclude: string[]): Declared => ({
       ...declared(service, [], {
-        backend: `mojaloop/${service}`,
+        backend: { namespace: 'mojaloop', name: service },
         hosts: ['intapi.test'],
         reaches: [{ matches: prefixes.map((path) => ({ type: 'PathPrefix' as const, path })) }],
         exclude,
@@ -137,11 +153,11 @@ describe('reconciling what the routes key', () => {
       ['lookup.view'],
       ['quotes.view'],
     ]);
-    expect(result.composition?.rules.lookup).toContain(
-      'url: <http|https>://intapi.test<(?!/\\.authz/openapi(?:/|$)|/quotes(?:/|$))(?:/participants(?:/.*)?|/parties(?:/.*)?)>',
+    expect(urlsOf(result.composition?.rules.lookup)).toContain(
+      '<http|https>://intapi.test<(?!/\\.authz/openapi(?:/|$)|/quotes(?:/|$))(?:/participants(?:/.*)?|/parties(?:/.*)?)>',
     );
-    expect(result.composition?.rules.quotes).toContain(
-      'url: <http|https>://intapi.test<(?!/\\.authz/openapi(?:/|$)|/participants(?:/|$)|/parties(?:/|$))(?:/quotes(?:/.*)?)>',
+    expect(urlsOf(result.composition?.rules.quotes)).toContain(
+      '<http|https>://intapi.test<(?!/\\.authz/openapi(?:/|$)|/participants(?:/|$)|/parties(?:/|$))(?:/quotes(?:/.*)?)>',
     );
   });
 
@@ -151,25 +167,48 @@ describe('reconciling what the routes key', () => {
     });
     const result = reconcile([unreached], widgets);
     expect(result.held).toEqual(['alpha']);
-    expect(result.problems).toEqual([`${unreached.origin}: no operation of alpha's document is reached by its routes`]);
+    expect(messagesOf(result.problems)).toEqual([`${unreached.origin}: no operation of alpha's document is reached by its routes`]);
   });
 
   it('holds a prefix keyed on two Services, and publishes the rest', () => {
     const result = reconcile(
       [
         declared('alpha', ['/widgets/{widgetId}']),
-        declared('alpha', ['/exports'], { backend: 'acme/acme-exporter' }),
+        declared('alpha', ['/exports'], { backend: { namespace: 'acme', name: 'acme-exporter' } }),
         declared('beta', ['/parts/{partId}']),
       ],
       both,
     );
     expect(result.held).toEqual(['alpha']);
-    expect(result.problems).toHaveLength(1);
-    expect(result.problems[0]).toBe(
-      'HTTPRoute/alpha/api → alpha/alpha-api, HTTPRoute/alpha/api → acme/acme-exporter: ' +
-        'alpha is keyed on acme/acme-exporter and alpha/alpha-api; a prefix belongs to one Service',
-    );
+    expect(result.problems).toEqual([
+      {
+        message:
+          'HTTPRoute/alpha/api → alpha/alpha-api, HTTPRoute/alpha/api → acme/acme-exporter: ' +
+          'alpha is keyed on acme/acme-exporter and alpha/alpha-api; a prefix belongs to one Service',
+        services: ['alpha'],
+        routes: [{ namespace: 'alpha', name: 'api' }],
+        documents: [],
+      },
+    ]);
     expect(result.composition?.catalog.map((c) => c.service)).toEqual(['beta']);
+  });
+
+  it('names the AuthzDocument a held prefix was read from, whatever the problem says', () => {
+    const schema = { namespace: 'alpha', name: 'alpha-document' };
+    const broken: Declared = {
+      ...declared('alpha', [], { source: { schema } }),
+      document: { openapi: '3.1.0', info: { title: 'a', version: '1' }, paths: { '/x': { get: { operationId: 'x' } } } },
+    };
+    const result = reconcile([broken], widgets);
+    expect(result.held).toEqual(['alpha']);
+    expect(result.problems).toEqual([
+      {
+        message: `${broken.origin}: GET /x: summary is required for the catalog`,
+        services: ['alpha'],
+        routes: [{ namespace: 'alpha', name: 'api' }],
+        documents: [schema],
+      },
+    ]);
   });
 
   it('keeps a held prefix at what it last composed to', () => {
@@ -178,12 +217,9 @@ describe('reconciling what the routes key', () => {
       both,
     );
     const unread: Declared = { ...declared('alpha', []), document: undefined, problem: 'answered 503' };
-    const after = reconcile([unread, declared('beta', ['/parts/{partId}'])], both, {
-      catalog: before.composition?.catalog,
-      services: before.services,
-    });
+    const after = reconcile([unread, declared('beta', ['/parts/{partId}'])], both, { services: before.services });
     expect(after.held).toEqual(['alpha']);
-    expect(after.problems).toEqual([`${unread.origin}: answered 503`]);
+    expect(messagesOf(after.problems)).toEqual([`${unread.origin}: answered 503`]);
     expect(after.composition?.catalog).toEqual(before.composition?.catalog);
   });
 
@@ -194,7 +230,7 @@ describe('reconciling what the routes key', () => {
     };
     const result = reconcile([declared('alpha', ['/widgets/{widgetId}']), broken], widgets);
     expect(result.held).toEqual(['broken']);
-    expect(result.problems).toEqual([`${broken.origin}: GET /x: summary is required for the catalog`]);
+    expect(messagesOf(result.problems)).toEqual([`${broken.origin}: GET /x: summary is required for the catalog`]);
     expect(result.composition?.catalog.map((c) => c.service)).toEqual(['alpha']);
   });
 
@@ -202,14 +238,20 @@ describe('reconciling what the routes key', () => {
     const result = reconcile(
       [
         declared('alpha', ['/widgets/{widgetId}']),
-        declared('alpha', ['/widgets/{widgetId}'], { source: 'AuthzDocument/alpha/other' }),
+        declared('alpha', ['/widgets/{widgetId}'], { source: { schema: { namespace: 'alpha', name: 'other' } } }),
       ],
       widgets,
     );
     expect(result.held).toEqual(['alpha']);
     expect(result.problems).toEqual([
-      'HTTPRoute/alpha/api → alpha/alpha-api: ' +
-        'alpha is read from AuthzDocument/alpha/other and http://alpha/alpha-api/.authz/openapi; a prefix has one document',
+      {
+        message:
+          'HTTPRoute/alpha/api → alpha/alpha-api: ' +
+          'alpha is read from AuthzDocument/alpha/other and http://alpha-api.alpha.svc/.authz/openapi; a prefix has one document',
+        services: ['alpha'],
+        routes: [{ namespace: 'alpha', name: 'api' }],
+        documents: [{ namespace: 'alpha', name: 'other' }],
+      },
     ]);
   });
 
@@ -225,7 +267,7 @@ describe('reconciling what the routes key', () => {
       widgets,
     );
     expect(result.held).toEqual(['alpha']);
-    expect(result.problems).toEqual([
+    expect(messagesOf(result.problems)).toEqual([
       'HTTPRoute/alpha/api → alpha/alpha-api: alpha is reached through different paths on a.test and b.test',
     ]);
   });
@@ -239,7 +281,7 @@ describe('reconciling what the routes key', () => {
       widgets,
     );
     expect(result.problems).toEqual([]);
-    expect(result.composition?.rules.alpha).toContain('<http|https>://<a\\.test|b\\.test>/widgets/');
+    expect(urlsOf(result.composition?.rules.alpha).some((url) => url.includes('<http|https>://<a\\.test|b\\.test>/widgets/'))).toBe(true);
   });
 
   it('holds a prefix its routes rewrite differently', () => {
@@ -255,7 +297,7 @@ describe('reconciling what the routes key', () => {
       widgets,
     );
     expect(result.held).toEqual(['alpha']);
-    expect(result.problems).toEqual([
+    expect(messagesOf(result.problems)).toEqual([
       'HTTPRoute/alpha/api → alpha/alpha-api: alpha is reached through different rewrites (/a→, /b→)',
     ]);
   });
@@ -269,7 +311,8 @@ describe('reconciling what the routes key', () => {
       naming({ service: 'alpha', type: 'widgets' }, { service: 'beta', type: 'widgets' }),
     );
     expect(result.composition).toBeUndefined();
-    expect(result.problems.join(' ')).toMatch(/beta and alpha both match/);
+    expect(result.problems).toContainEqual(expect.objectContaining({ services: ['beta', 'alpha'] }));
+    expect(messagesOf(result.problems).join(' ')).toMatch(/beta and alpha both match/);
   });
 
   it('asks the deployment to vouch for a type no path binds', () => {

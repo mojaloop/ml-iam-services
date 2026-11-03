@@ -1,7 +1,7 @@
 import { test } from 'vitest';
 import assert from 'node:assert/strict';
 
-import { createGuard, guardReaching, restrictedTo, EVERYTHING, UNRESTRICTED, Forbidden, GuardError } from '~/index';
+import { createGuard, UNRESTRICTED, Forbidden, GuardError } from '~/index';
 
 /** Fixtures are written malformed on purpose, so nothing here is typed. */
 type Fixture = Record<string, any>;
@@ -43,7 +43,7 @@ const req = (url: string, scope?: string, method = 'GET') => ({
 
 test('a caller nothing restricts sees everything', async () => {
   const guard = await createGuard(doc);
-  const orders = guard(req('/api/orders', 'orders=*'), 'orders');
+  const orders = guard(req('/api/orders', 'orders=$all'), 'orders');
   assert.equal(orders.restricted, false);
   assert.equal(orders.allows('anything'), true);
   assert.deepEqual(orders.narrow([{ id: 'o1' }, { id: 'o2' }], (row) => row.id), [{ id: 'o1' }, { id: 'o2' }]);
@@ -68,7 +68,7 @@ test('a caller holding some sees those, and narrows a list to them', async () =>
  */
 test('the ids of an unrestricted caller are empty, not everything', async () => {
   const guard = await createGuard(doc);
-  assert.deepEqual(guard(req('/api/orders', 'orders=*'), 'orders').ids, []);
+  assert.deepEqual(guard(req('/api/orders', 'orders=$all'), 'orders').ids, []);
   assert.deepEqual(guard(UNRESTRICTED, 'orders').ids, []);
 });
 
@@ -82,7 +82,7 @@ test('a caller holding none is refused, with a status a framework can render', a
 
 test('a query string does not stop the operation being found', async () => {
   const guard = await createGuard(doc);
-  assert.equal(guard(req('/api/orders?limit=20&after=o1', 'orders=*'), 'orders').restricted, false);
+  assert.equal(guard(req('/api/orders?limit=20&after=o1', 'orders=$all'), 'orders').restricted, false);
 });
 
 test('an id the path carries belongs to a caller the gateway let through', async () => {
@@ -98,12 +98,23 @@ test('a call with no gateway in its path passes the sentinel', async () => {
 
 test('asking about a type the operation is not scoped by is a mistake in the service', async () => {
   const guard = await createGuard(doc);
-  assert.throws(() => guard(req('/api/orders', 'orders=*'), 'customers'), GuardError);
+  assert.throws(() => guard(req('/api/orders', 'orders=$all'), 'customers'), GuardError);
+});
+
+test('an operation scoped by $resources answers for any resource name, by its own name', async () => {
+  const wide: Fixture = structuredClone(doc);
+  wide.paths['/orders'].get['x-authz'] = { scopedBy: ['orders', '$resources'] };
+  const guard = await createGuard(wide);
+  const asked = req('/api/orders', 'orders=$all;region=eu,us');
+  assert.deepEqual(guard(asked, 'region').ids, ['eu', 'us']);
+  assert.throws(() => guard(asked, 'warehouse'), Forbidden);
+  const plain = await createGuard(doc);
+  assert.throws(() => plain(asked, 'region'), GuardError, 'without $resources the name is a mistake');
 });
 
 test('a path the document does not describe is a mistake in the service', async () => {
   const guard = await createGuard(doc);
-  assert.throws(() => guard(req('/api/nothing', 'orders=*'), 'orders'), GuardError);
+  assert.throws(() => guard(req('/api/nothing', 'orders=$all'), 'orders'), GuardError);
 });
 
 test('an unknown x-authz key is refused at startup', async () => {
@@ -142,19 +153,6 @@ test('a bare type the path binds is refused, because it would read as unbound', 
   await assert.rejects(() => createGuard(bad), /the path binds orders through \{orderId\}/);
 });
 
-test('a guard can be built from what a caller reaches, for whatever stands in for a decision', () => {
-  const guard = guardReaching({ orders: restrictedTo(['o1']), customers: EVERYTHING });
-  assert.deepEqual(guard.scopedBy().sort(), ['customers', 'orders']);
-  assert.equal(guard({}, 'orders').allows('o1'), true);
-  assert.equal(guard({}, 'orders').allows('o2'), false);
-  assert.equal(guard({}, 'customers').restricted, false);
-});
-
-test('a guard built from what a caller reaches refuses a type it was not given', () => {
-  const guard = guardReaching({ orders: EVERYTHING });
-  assert.throws(() => guard({}, 'customers'), GuardError);
-});
-
 test('a list is a list however its type is written', async () => {
   const union: Fixture = structuredClone(doc);
   delete union.paths['/orders'].get['x-authz'];
@@ -180,8 +178,8 @@ everyMethod.paths['/orders'].additionalOperations = {
 
 test('a method with no fixed field of its own is still an operation', async () => {
   const guard = await createGuard(everyMethod);
-  assert.deepEqual(guard.scopedBy(req('/api/orders', 'orders=*', 'TRACE')), []);
-  assert.deepEqual(guard.scopedBy(req('/api/orders', 'orders=*', 'PURGE')), []);
+  assert.deepEqual(guard.scopedBy(req('/api/orders', 'orders=$all', 'TRACE')), []);
+  assert.deepEqual(guard.scopedBy(req('/api/orders', 'orders=$all', 'PURGE')), []);
 });
 
 test('a scopedBy entry that is neither a type nor one binding is refused at startup', async () => {

@@ -1,3 +1,5 @@
+import { serviceOf } from '../authzgen/permission';
+import { ALL, idProblem } from '../authzgen/reserved';
 import { CatalogPermission, ServiceCatalog } from '../authzgen/types';
 import { Exclusion } from './exclusions';
 
@@ -6,17 +8,17 @@ import { Exclusion } from './exclusions';
  * the only thing that ever turns into a grant.
  *
  * A grant names a permission and, per resource name the permission is scoped
- * by, either names the resources (`all`, an id, a list) or leaves the
- * resource name open. Every open one is the assignment's to name, so the
- * role's signature is derived, never declared. Which resource names scope a
+ * by, either fixes it to `$all` or leaves it open. Every open one is the
+ * assignment's to name, so the role's signature is derived, never declared.
+ * Only the IAM's own resource names, roles and permissions, which are
+ * deployment data themselves, are named by id. Which resource names scope a
  * permission comes from the composed catalog, so the role document repeats
  * nothing the documents already say.
  */
 
-/** The whole resource name: every resource of it, present and future. */
-export const ALL = 'all';
+export { ALL } from '../authzgen/reserved';
 
-/** `all`, one id, or several ids. */
+/** `$all`, one id, or several ids. */
 export type ResourceSet = string | string[];
 
 export interface RoleGrant {
@@ -25,10 +27,14 @@ export interface RoleGrant {
   resources?: Record<string, ResourceSet>;
 }
 
+/** Who holds a role without being assigned it. */
+export const HeldBy = { authenticated: 'authenticated' } as const;
+export type HeldBy = (typeof HeldBy)[keyof typeof HeldBy];
+
 export interface RoleDocument {
   grants: RoleGrant[];
   /** Held by every authenticated subject; never assigned, so it fixes every resource it grants over. */
-  heldBy?: 'authenticated';
+  heldBy?: HeldBy;
 }
 
 export interface Assignment {
@@ -67,7 +73,7 @@ export interface ReadyRoles {
 export function readyRoles(file: RolesFile, catalogs: ServiceCatalog[]): ReadyRoles {
   const composed = new Set(catalogs.map((c) => c.service));
   const absent = (ids: string[]): string[] =>
-    [...new Set(ids.map((id) => id.split('.')[0]!).filter((service) => !composed.has(service)))].sort();
+    [...new Set(ids.map(serviceOf).filter((service) => !composed.has(service)))].sort();
 
   const pending: string[] = [];
   const roles: Record<string, RoleDocument> = {};
@@ -110,30 +116,68 @@ export const grantResources = (
   return named;
 };
 
+/** The resource names a permission reaches through `$resources`, which follow the assignment and open nothing. */
+export const followedNames = (permission: CatalogPermission): Set<string> =>
+  new Set((permission.followsAssignment ?? []).map((type) => permission.resourceNames[type]!));
+
 /** The resource names an assignment to this role must name: every one its grants leave open. */
 export const openResourceNames = (role: RoleDocument, index: PermissionIndex): string[] => {
   const open = new Set<string>();
   for (const grant of role.grants ?? []) {
     const permission = index.get(grant.permission);
     if (permission === undefined) continue;
+    const followed = followedNames(permission);
     for (const [resourceName, named] of grantResources(grant, permission)) {
-      if (named === undefined) open.add(resourceName);
+      if (named === undefined && !followed.has(resourceName)) open.add(resourceName);
     }
   }
   return [...open].sort();
 };
 
+/**
+ * The roles whose grants name this one by id, under the resource name roles
+ * go by. A grant naming it would outlive it and reach a later role of the
+ * same name, so it stays while any do; a role naming itself goes with it.
+ */
+export const rolesNaming = (name: string, roles: Record<string, RoleDocument>, roleName: string | undefined): string[] =>
+  roleName === undefined
+    ? []
+    : Object.entries(roles)
+      .filter(([other, role]) =>
+        other !== name &&
+          role.grants.some((grant) => {
+            const named = grant.resources?.[roleName];
+            return named !== undefined && named !== ALL && (Array.isArray(named) ? named : [named]).includes(name);
+          }),
+      )
+      .map(([other]) => other)
+      .sort();
+
+export const namedByProblem = (name: string, naming: string[]): string =>
+  `${name} is named by the grants of ${naming.join(', ')}; take it out of them first`;
+
 const same = (a: string[], b: string[]): boolean =>
   a.length === b.length && [...a].sort().every((v, i) => v === [...b].sort()[i]);
 
-/** Every way a role document can be wrong, collected into one report. */
-export function validateRoles(file: RolesFile, index: PermissionIndex): string[] {
+/**
+ * Every way a role document can be wrong, collected into one report.
+ *
+ * @param own  the IAM's own resource names, roles and permissions: the only
+ *             ones a grant names by id, since their ids are deployment data
+ *             rather than things services create and retire
+ */
+export function validateRoles(file: RolesFile, index: PermissionIndex, own: ReadonlySet<string> = new Set()): string[] {
   const problems: string[] = [];
 
   for (const [name, role] of Object.entries(file.roles ?? {})) {
     if (!Array.isArray(role.grants) || role.grants.length === 0) {
       problems.push(`${name}: has no grants`);
       continue;
+    }
+
+    const granted = role.grants.map((g) => g.permission);
+    for (const permission of [...new Set(granted.filter((p, at) => granted.indexOf(p) !== at))]) {
+      problems.push(`${name}: grants ${permission} more than once; a role gives each permission once, with one reach`);
     }
 
     if (role.heldBy !== undefined) {
@@ -160,10 +204,24 @@ export function validateRoles(file: RolesFile, index: PermissionIndex): string[]
           problems.push(`${name}: ${grant.permission} names ${resourceName}, which does not scope it`);
           continue;
         }
-        for (const id of Array.isArray(named) ? named : [named]) {
+        const ids = Array.isArray(named) ? named : [named];
+        if (ids.length > 1 && ids.includes(ALL)) {
+          problems.push(`${name}: ${grant.permission} lists ${ALL} among ${resourceName} ids; ${ALL} stands alone`);
+        }
+        const listed = ids.filter((id) => id !== ALL);
+        for (const id of listed) {
           if (typeof id !== 'string' || id.length === 0) {
             problems.push(`${name}: ${grant.permission} names an empty ${resourceName} id`);
+            continue;
           }
+          const problem = idProblem(id);
+          if (problem !== undefined) problems.push(`${name}: ${grant.permission} names ${resourceName} ${problem}`);
+        }
+        const runtime = listed.filter((id) => typeof id === 'string' && idProblem(id) === undefined);
+        if (!own.has(resourceName) && runtime.length > 0) {
+          problems.push(
+            `${name}: ${grant.permission} names ${resourceName} ${runtime.join(',')}; a role fixes ${resourceName} to ${ALL} or leaves it to the assignment`,
+          );
         }
       }
     }

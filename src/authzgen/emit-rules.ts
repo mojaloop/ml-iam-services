@@ -1,6 +1,10 @@
 import { DOCUMENT_PATH } from '@mojaloop/authz';
+import { HEADER as SCOPE_HEADER, NONE as NO_SCOPE } from '@mojaloop/authz/gateway';
 
 import { ketoNamespace } from './keto-name';
+import { permissionId } from './permission';
+import { SINGLETON } from './reserved';
+import { resourceObject } from './resource-object';
 import { Permission, ServiceBundle } from './types';
 
 /**
@@ -48,9 +52,13 @@ export interface Rewrite {
   to: string;
 }
 
+/** How a mount matches a client path: that path alone, or it and everything under it. */
+export const MountType = { exact: 'Exact', prefix: 'PathPrefix' } as const;
+export type MountType = (typeof MountType)[keyof typeof MountType];
+
 /** A client path a route sends to the backend: one path, or a prefix and everything under it. */
 export interface Mount {
-  type: 'Exact' | 'PathPrefix';
+  type: MountType;
   path: string;
   method?: string;
 }
@@ -73,10 +81,50 @@ export interface Serving {
    * order Oathkeeper should try them.
    */
   authenticators?: string[];
+  /** The backend is told who is asking: the IAM's own operations, and no service's. */
+  caller?: boolean;
 }
 
+/** The gateway's handlers a rule names. */
+export const GatewayHandler = {
+  noop: 'noop',
+  allow: 'allow',
+  remoteJson: 'remote_json',
+  cookieSession: 'cookie_session',
+  jwt: 'jwt',
+  header: 'header',
+} as const;
+
+/** One mutator: `header` sets each of its headers on the request, replacing whatever the client sent under that name. */
+export interface Mutator {
+  handler: string;
+  config?: { headers: Record<string, string> };
+}
+
+/** One access rule as the gateway reads it. */
+export interface AccessRule {
+  id: string;
+  match: { url: string; methods: string[] };
+  authenticators: Array<{ handler: string }>;
+  authorizer: { handler: string; config?: { payload: string } };
+  mutators: Mutator[];
+}
+
+/** The header the IAM reads its caller from. */
+export const CALLER_HEADER = 'x-user';
+
 /** What a deployment accepts when it names nothing. */
-const AUTHENTICATORS = ['cookie_session', 'jwt'];
+const AUTHENTICATORS = [GatewayHandler.cookieSession, GatewayHandler.jwt];
+
+/** The gateway's template for the authenticated subject. */
+export const SUBJECT_TEMPLATE = '{{ print .Subject }}';
+
+/** The gateway's template for a capture group of the matched URL. */
+export const captureTemplate = (index: number): string => `{{ printIndex .MatchContext.RegexpCaptureGroups ${index} }}`;
+
+/** The rule a service's CORS preflights match, under its own prefix. */
+const PREFLIGHT = 'preflight';
+const PREFLIGHT_METHOD = 'OPTIONS';
 
 /**
  * The path a client sends for a path the backend sees, or nothing when the
@@ -117,7 +165,7 @@ const methodAllows = (mount: Mount, method?: string): boolean =>
 
 /** Whether a route sending this mount sends everything under the prefix. */
 const covers = (mount: Mount, prefix: string): boolean => {
-  if (mount.type !== 'PathPrefix') return false;
+  if (mount.type !== MountType.prefix) return false;
   const path = trimSlash(mount.path);
   return path === '' || prefix === path || prefix.startsWith(`${path}/`);
 };
@@ -131,10 +179,10 @@ const reachedUnder = (prefix: string, serving: Serving, method?: string): string
   const mounts = serving.within.filter((mount) => methodAllows(mount, method));
   if (mounts.some((mount) => covers(mount, prefix))) return undefined;
   const alternatives = mounts.flatMap((mount) => {
-    const path = mount.type === 'PathPrefix' ? trimSlash(mount.path) : mount.path;
+    const path = mount.type === MountType.prefix ? trimSlash(mount.path) : mount.path;
     if (path !== prefix && !path.startsWith(`${prefix}/`)) return [];
     const relative = escape(path.slice(prefix.length));
-    return [mount.type === 'PathPrefix' ? `${relative}(?:/.*)?` : relative];
+    return [mount.type === MountType.prefix ? `${relative}(?:/.*)?` : relative];
   });
   return [...new Set(alternatives)].sort();
 };
@@ -207,19 +255,25 @@ export const matchUrl = (
  * service reads back in X-Scope.
  */
 const payloadFor = (permission: Permission, service: string): string => {
-  const check = (object: string) =>
-    `{"namespace":"${ketoNamespace(service)}","object":"${object}","relation":"${permission.name}","subject_id":"{{ print .Subject }}"}`;
+  const check = (object: string) => ({
+    namespace: ketoNamespace(service),
+    object,
+    relation: permission.name,
+    subject_id: SUBJECT_TEMPLATE,
+  });
 
   const checks = permission.scopedBy
     .filter((r) => r.captureIndex !== undefined)
-    .map((r) => check(`${r.resourceName}/{{ printIndex .MatchContext.RegexpCaptureGroups ${r.captureIndex} }}`));
+    .map((r) => check(resourceObject(r.resourceName!, captureTemplate(r.captureIndex!))));
 
-  const body = checks.length === 0 ? check('__self__') : checks.length === 1 ? checks[0]! : `{"allOf":[${checks.join(',')}]}`;
+  const body = checks.length === 0 ? check(SINGLETON) : checks.length === 1 ? checks[0]! : { allOf: checks };
 
-  const scope = permission.scopedBy
-    .map((r) => `{"type":"${r.type}","resourceName":"${r.resourceName}"}`)
-    .join(',');
-  return `${body.slice(0, -1)},"scope":[${scope}]}`;
+  const scope = permission.scopedBy.map((r) => ({
+    type: r.type,
+    resourceName: r.resourceName,
+    ...(r.followsAssignment ? { followsAssignment: true } : {}),
+  }));
+  return JSON.stringify({ ...body, scope });
 };
 
 const rule = (
@@ -227,35 +281,41 @@ const rule = (
   bundle: ServiceBundle,
   allPaths: string[],
   serving: Serving,
-): unknown => {
+): AccessRule => {
   return {
     id: permission.id,
     match: { url: matchUrl(permission, bundle, allPaths, serving), methods: [permission.method] },
     authenticators: (serving.authenticators ?? AUTHENTICATORS).map((handler) => ({ handler })),
     authorizer: {
-      handler: 'remote_json',
+      handler: GatewayHandler.remoteJson,
       config: { payload: payloadFor(permission, bundle.service) },
     },
-    mutators: [{ handler: 'noop' }],
+    mutators: serving.caller
+      ? [{ handler: GatewayHandler.header, config: { headers: { [CALLER_HEADER]: SUBJECT_TEMPLATE } } }]
+      : [{ handler: GatewayHandler.noop }],
   };
 };
 
-/** CORS preflights carry no credentials and are answered before authorization. */
-const preflight = (bundle: ServiceBundle, serving: Serving): unknown => {
+/**
+ * CORS preflights carry no credentials and are answered before authorization.
+ * The decision is never asked, so the rule states the scope itself: a request
+ * the gateway lets through always carries the gateway's scope.
+ */
+const preflight = (bundle: ServiceBundle, serving: Serving): AccessRule => {
   const prefix = prefixOf(bundle, serving);
   return {
-    id: `${bundle.service}.preflight`,
+    id: permissionId(bundle.service, PREFLIGHT),
     match: {
       url: `<http|https>://${hostPart(serving.hosts)}${prefix}${subtree(prefix, serving, undefined, bundle.internalPaths)}`,
-      methods: ['OPTIONS'],
+      methods: [PREFLIGHT_METHOD],
     },
-    authenticators: [{ handler: 'noop' }],
-    authorizer: { handler: 'allow' },
-    mutators: [{ handler: 'noop' }],
+    authenticators: [{ handler: GatewayHandler.noop }],
+    authorizer: { handler: GatewayHandler.allow },
+    mutators: [{ handler: GatewayHandler.header, config: { headers: { [SCOPE_HEADER]: NO_SCOPE } } }],
   };
 };
 
-export function emitRules(bundle: ServiceBundle, serving: Serving = {}): unknown[] {
+export function emitRules(bundle: ServiceBundle, serving: Serving = {}): AccessRule[] {
   const allPaths = [...new Set([...bundle.permissions.map((p) => p.path), ...bundle.internalPaths])];
   return [preflight(bundle, serving), ...bundle.permissions.map((p) => rule(p, bundle, allPaths, serving))];
 }

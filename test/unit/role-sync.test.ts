@@ -1,25 +1,9 @@
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, describe, expect, it } from 'vitest';
 
 import { CatalogPermission, ServiceCatalog } from '../../src/authzgen/types';
+import { EMPTY, History } from '../../src/iam/history';
 import { membership } from '../../src/iam/materialize';
-
-const cluster = vi.hoisted(() => ({
-  roles: [] as unknown[],
-  separations: [] as unknown[],
-  statuses: [] as Array<{ name: string; status: Record<string, unknown> }>,
-}));
-
-vi.mock('../../src/operator/cluster', () => ({
-  AuthzRole: class AuthzRole {},
-  AuthzSeparation: class AuthzSeparation {},
-  listRoles: vi.fn(async () => cluster.roles),
-  listSeparations: vi.fn(async () => cluster.separations),
-  setStatus: vi.fn(async (_model: unknown, _namespace: string, name: string, status: Record<string, unknown>) => {
-    cluster.statuses.push({ name, status });
-  }),
-}));
-
-import { RoleSync } from '../../src/iam/role-sync';
+import { RoleSync, RoleView, RuleView } from '../../src/iam/role-sync';
 import { RolesFile } from '../../src/iam/roles';
 import { MemoryKeto } from './memory-keto';
 
@@ -57,19 +41,44 @@ const verdict = (name: string) =>
     | { conditions: Array<{ reason: string; message: string }>; open?: string[]; violations?: string[] }
     | undefined;
 
+const cluster = {
+  roles: [] as unknown[],
+  separations: [] as unknown[],
+  statuses: [] as Array<{ name: string; status: Record<string, unknown> }>,
+  history: EMPTY as History,
+  rewritten: [] as Array<{ name: string; grants: string[] }>,
+};
+
 const setup = () => {
   const keto = new MemoryKeto(['Role', 'Resource', 'ledger']);
   let live: RolesFile | undefined;
+  let waiting: RolesFile['roles'] | undefined;
+  let told: { roles: RoleView[]; rules: RuleView[] } | undefined;
   const sync = new RoleSync({
     keto,
+    objects: async () => ({ roles: cluster.roles as never, separations: cluster.separations as never }),
+    setStatus: async (_model, _namespace, name, status) => {
+      cluster.statuses.push({ name, status });
+    },
+    history: () => cluster.history,
+    owns: (object) => object.metadata?.namespace === 'iam',
+    rewrite: async (object, grants) => {
+      cluster.rewritten.push({ name: object.metadata!.name!, grants: grants.map((g) => g.permission) });
+    },
     catalog: () => catalog,
+    own: () => new Set(),
     ready: async () => undefined,
     namespacesOf: () => [],
-    onApplied: (applied) => {
+    exclusive: (write) => write(),
+    onApplied: (applied, _result, _pending, roles) => {
       live = applied;
+      waiting = roles;
+    },
+    onTold: (roles, rules) => {
+      told = { roles, rules };
     },
   });
-  return { keto, sync, live: () => live };
+  return { keto, sync, live: () => live, waiting: () => waiting, told: () => told };
 };
 
 describe('keeping the roles applied', () => {
@@ -77,6 +86,53 @@ describe('keeping the roles applied', () => {
     cluster.roles = [];
     cluster.separations = [];
     cluster.statuses = [];
+    cluster.history = EMPTY;
+    cluster.rewritten = [];
+  });
+
+  it('holds a grant under the new name of a renamed permission, and says so', async () => {
+    cluster.roles = [role('reader', ['ledger.fetch'])];
+    cluster.history = { known: {}, renamed: { 'ledger.fetch': 'ledger.read' }, removed: [] };
+    const { keto, sync, live } = setup();
+
+    await sync.run();
+
+    expect(live()!.roles['reader']!.grants.map((g) => g.permission)).toEqual(['ledger.read']);
+    expect(keto.tuples.map((t) => t.relation)).toEqual(['read']);
+    expect(verdict('reader')).toMatchObject({ warnings: ['ledger.fetch is now ledger.read; the grant holds under the new name'] });
+    expect(cluster.rewritten).toEqual([]);
+  });
+
+  it('drops the grant of a removed permission and keeps the rest of the role', async () => {
+    cluster.roles = [role('reader', ['ledger.read', 'ledger.purge'])];
+    cluster.history = { known: {}, renamed: {}, removed: ['ledger.purge'] };
+    const { sync, live } = setup();
+
+    await sync.run();
+
+    expect(live()!.roles['reader']!.grants.map((g) => g.permission)).toEqual(['ledger.read']);
+    expect(verdict('reader')?.conditions[0]).toMatchObject({ reason: 'Accepted' });
+    expect(verdict('reader')).toMatchObject({ warnings: ['ledger.purge was removed from ledger; its grant is dropped'] });
+  });
+
+  it('moves a role it keeps itself to the new name', async () => {
+    cluster.roles = [role('composed', ['ledger.fetch'], 'iam')];
+    cluster.history = { known: {}, renamed: { 'ledger.fetch': 'ledger.read' }, removed: [] };
+    const { sync } = setup();
+
+    await sync.run();
+
+    expect(cluster.rewritten).toEqual([{ name: 'composed', grants: ['ledger.read'] }]);
+  });
+
+  it('still refuses a permission the deployment never had', async () => {
+    cluster.roles = [role('typo', ['ledger.raed'])];
+    cluster.history = { known: {}, renamed: { 'ledger.fetch': 'ledger.read' }, removed: ['ledger.purge'] };
+    const { sync } = setup();
+
+    await sync.run();
+
+    expect(verdict('typo')?.conditions[0]).toMatchObject({ reason: 'Refused' });
   });
 
   it('applies a valid role and says what an assignment must name', async () => {
@@ -93,11 +149,12 @@ describe('keeping the roles applied', () => {
 
   it('holds nothing for a role that is refused or waits, and says why', async () => {
     cluster.roles = [role('typo', ['ledger.raed']), role('payer', ['payouts.create'])];
-    const { keto, sync } = setup();
+    const { keto, sync, waiting } = setup();
 
     await sync.run();
 
     expect(keto.tuples).toEqual([]);
+    expect(Object.keys(waiting()!)).toEqual(['payer']);
     expect(verdict('typo')?.conditions[0]).toMatchObject({ reason: 'Refused', message: 'typo: unknown permission ledger.raed' });
     expect(verdict('payer')?.conditions[0]).toMatchObject({ reason: 'Waiting', message: 'waits for payouts' });
   });
@@ -114,6 +171,25 @@ describe('keeping the roles applied', () => {
     expect(keto.tuples.map((t) => t.relation)).toEqual(['read']);
     const refused = cluster.statuses.find((s) => (s.status.conditions as Array<{ reason: string }>)[0]!.reason === 'Refused');
     expect((refused?.status.conditions as Array<{ message: string }>)[0]!.message).toContain('already defined by AuthzRole/ory/reader');
+  });
+
+  it('tells the composition what became of every object, the refused one included', async () => {
+    cluster.roles = [
+      role('reader', ['ledger.write'], 'mcm', '2026-10-02T00:00:00Z'),
+      role('reader', ['ledger.read'], 'ory', '2026-10-01T00:00:00Z'),
+      role('operator', ['ledger.get']),
+    ];
+    const { sync, told } = setup();
+
+    await sync.run();
+
+    expect(told()!.roles.map((r) => [r.namespace, r.name, r.ready.reason, r.open])).toEqual(
+      expect.arrayContaining([
+        ['mcm', 'reader', 'Refused', []],
+        ['ory', 'reader', 'Accepted', []],
+        [expect.any(String), 'operator', 'Accepted', ['participant']],
+      ]),
+    );
   });
 
   it('lists the subjects a new rule finds holding both groups, and takes nothing away', async () => {

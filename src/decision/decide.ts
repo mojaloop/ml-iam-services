@@ -1,13 +1,9 @@
 import { Scope, ScopeEntry } from '@mojaloop/authz/gateway';
 
-import { check, query, Tuple } from './keto';
+import type { KetoReader } from '../iam/keto';
+import { AUTHENTICATED, HELD_BY, MEMBERS, ROLE_NAMESPACE, SubjectSet, Tuple, TYPE_WIDE } from '../iam/materialize';
+import { parseResource, resourceObject } from '../iam/registry';
 import { Check, Payload } from './payload';
-
-/** Object ids and namespaces the platform fixes, because they live in stored tuples. */
-export const TYPE_WIDE = '__all__';
-export const SINGLETON = '__self__';
-export const ROLE_NAMESPACE = 'Role';
-export const MEMBERS = 'members';
 
 /** What a service sees when the request carried no row filtering. */
 export const NO_SCOPE: Scope = new Map();
@@ -18,24 +14,28 @@ export interface Decision {
   violations: Tuple[];
 }
 
-const typeOf = (object: string): string | undefined => {
-  const slash = object.indexOf('/');
-  return slash > 0 ? object.slice(0, slash) : undefined;
-};
-
 /**
  * A grant on the type-wide object covers every resource of that type, present
  * and future, so it answers the same question as a grant on the resource
  * itself. The singleton has no wider form.
  */
 const objectsFor = (object: string): string[] => {
-  const type = typeOf(object);
-  return type === undefined ? [object] : [object, `${type}/${TYPE_WIDE}`];
+  const resource = parseResource(object);
+  return resource === undefined ? [object] : [object, resourceObject(resource.resourceName, TYPE_WIDE)];
 };
 
-const passes = async (c: Check): Promise<boolean> => {
+const members = (role: string): SubjectSet => ({ namespace: ROLE_NAMESPACE, object: role, relation: MEMBERS });
+
+/** The roles every authenticated subject holds, which no membership records. */
+export const heldByEveryone = async (keto: KetoReader): Promise<string[]> =>
+  (await keto.query({ namespace: ROLE_NAMESPACE, relation: HELD_BY, subject_id: AUTHENTICATED })).map((t) => t.object);
+
+const passes = async (keto: KetoReader, c: Check, everyone: string[]): Promise<boolean> => {
   for (const object of objectsFor(c.object)) {
-    if (await check(c.namespace, object, c.relation, c.subject_id)) return true;
+    if (await keto.check(c.namespace, object, c.relation, c.subject_id)) return true;
+    for (const role of everyone) {
+      if (await keto.check(c.namespace, object, c.relation, members(role))) return true;
+    }
   }
   return false;
 };
@@ -56,19 +56,25 @@ interface Holder {
  * about one operation over one set of resources, and merging two roles would
  * invent combinations neither of them granted.
  */
-async function grantHolders(namespace: string, subjectId: string): Promise<Holder[]> {
-  const roles = await query({ namespace: ROLE_NAMESPACE, relation: MEMBERS, subject_id: subjectId });
+export async function grantHolders(
+  keto: KetoReader,
+  namespace: string,
+  subjectId: string,
+  everyone: string[],
+): Promise<Holder[]> {
+  const roles = await keto.query({ namespace: ROLE_NAMESPACE, relation: MEMBERS, subject_id: subjectId });
+  const instances = [...new Set([...roles.map((role) => role.object), ...everyone])];
   const held = await Promise.all(
-    roles.map((role) =>
-      query({
+    instances.map((role) =>
+      keto.query({
         namespace,
         'subject_set.namespace': ROLE_NAMESPACE,
-        'subject_set.object': role.object,
+        'subject_set.object': role,
         'subject_set.relation': MEMBERS,
       }),
     ),
   );
-  const direct = await query({ namespace, subject_id: subjectId });
+  const direct = await keto.query({ namespace, subject_id: subjectId });
   const holders = held.map((tuples) => ({ tuples, direct: false }));
   return direct.length === 0 ? holders : [...holders, { tuples: direct, direct: true }];
 }
@@ -84,15 +90,14 @@ const admits = (holder: Holder, checks: Check[]): boolean =>
  * on the resource. That is exactly what this finds, so the header and a
  * per-resource check can never disagree.
  */
-const overType = (tuples: Tuple[], type: string): ScopeEntry => {
-  const prefix = `${type}/`;
+const overType = (tuples: Tuple[], resourceName: string): ScopeEntry => {
   const ids = new Set<string>();
   let all = false;
   for (const tuple of tuples) {
-    if (!tuple.object.startsWith(prefix)) continue;
-    const id = tuple.object.slice(prefix.length);
-    if (id === TYPE_WIDE) all = true;
-    else ids.add(id);
+    const resource = parseResource(tuple.object);
+    if (resource?.resourceName !== resourceName) continue;
+    if (resource.id === TYPE_WIDE) all = true;
+    else ids.add(resource.id);
   }
   return { all, ids: [...ids].sort() };
 };
@@ -102,26 +107,29 @@ const overType = (tuples: Tuple[], type: string): ScopeEntry => {
  * Every allow carries a scope, so a service can tell an authorized request
  * from one that never passed through the gateway.
  */
-export async function decide(payload: Payload): Promise<Decision> {
+export async function decide(payload: Payload, keto: KetoReader): Promise<Decision> {
   const namespace = payload.checks[0]!.namespace;
   if (payload.checks.some((c) => c.namespace !== namespace)) {
     return { allowed: false, scope: NO_SCOPE, violations: [] };
   }
 
+  const everyone = await heldByEveryone(keto);
   for (const c of payload.checks) {
-    if (!(await passes(c))) return { allowed: false, scope: NO_SCOPE, violations: [] };
+    if (!(await passes(keto, c, everyone))) return { allowed: false, scope: NO_SCOPE, violations: [] };
   }
 
   if (payload.scope.length === 0) {
     return { allowed: true, scope: NO_SCOPE, violations: [] };
   }
 
-  const holders = await grantHolders(namespace, payload.checks[0]!.subject_id);
+  const holders = await grantHolders(keto, namespace, payload.checks[0]!.subject_id, everyone);
   const violations = holders.filter((h) => h.direct).flatMap((h) => h.tuples);
-  // Only what admitted this request says what it may see, so a role granting
-  // one report for one participant cannot lend its participant to a report it
-  // never granted.
-  const tuples = holders.filter((h) => admits(h, payload.checks)).flatMap((h) => h.tuples);
+  // Only the grant that admitted this request says what it may see: a role's
+  // grant of another operation lends this one none of its resources.
+  const relations = new Set(payload.checks.map((c) => c.relation));
+  const tuples = holders
+    .filter((h) => admits(h, payload.checks))
+    .flatMap((h) => h.tuples.filter((t) => relations.has(t.relation)));
   const visible: Scope = new Map();
   for (const pair of payload.scope) {
     // The grants hold the resource name; the caller's service reads its own
@@ -130,7 +138,9 @@ export async function decide(payload: Payload): Promise<Decision> {
     // A declared scope the caller has no standing in is a denial. An empty
     // list would read as "no restriction" in a query layer and return the
     // whole table, and on a write it would leave the caller unattributable.
-    if (!seen.all && seen.ids.length === 0) {
+    // A name `$resources` brought in is the operation's reach over it, which
+    // may be none, and the service asks its guard for exactly that.
+    if (!seen.all && seen.ids.length === 0 && pair.followsAssignment !== true) {
       return { allowed: false, scope: NO_SCOPE, violations };
     }
     visible.set(pair.type, seen);

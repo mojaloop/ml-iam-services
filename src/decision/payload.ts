@@ -17,6 +17,8 @@ export interface Check {
 export interface ScopePair {
   type: string;
   resourceName: string;
+  /** Brought in by `$resources`: holding none of it reaches none, rather than refusing the request. */
+  followsAssignment?: true;
 }
 
 export interface Payload {
@@ -27,6 +29,7 @@ export interface Payload {
 
 const CHECK_KEYS = ['namespace', 'object', 'relation', 'subject_id'];
 const SCOPE_KEYS = ['type', 'resourceName'];
+const FOLLOWS = 'followsAssignment';
 
 const isRecord = (value: unknown): value is Record<string, unknown> =>
   typeof value === 'object' && value !== null && !Array.isArray(value);
@@ -42,8 +45,9 @@ const asCheck = (value: unknown): Check | undefined => {
 
 const asScopePair = (value: unknown): ScopePair | undefined => {
   if (!isRecord(value)) return undefined;
-  if (Object.keys(value).some((key) => !SCOPE_KEYS.includes(key))) return undefined;
+  if (Object.keys(value).some((key) => !SCOPE_KEYS.includes(key) && key !== FOLLOWS)) return undefined;
   if (!SCOPE_KEYS.every((key) => text(value[key]))) return undefined;
+  if (value[FOLLOWS] !== undefined && value[FOLLOWS] !== true) return undefined;
   return value as unknown as ScopePair;
 };
 

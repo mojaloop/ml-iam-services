@@ -1,5 +1,10 @@
+import { JsonPointer } from 'json-ptr';
+import { stringify } from 'yaml';
+
 import { CANONICAL_STUBS, emitNamespace } from './emit-model';
+import { AccessRule } from './emit-rules';
 import { ketoNamespace } from './keto-name';
+import { Problem } from './problem';
 import { ServiceBundle, ServiceCatalog } from './types';
 
 /**
@@ -15,7 +20,7 @@ import { ServiceBundle, ServiceCatalog } from './types';
 
 export interface ComposedService {
   bundle: ServiceBundle;
-  rules: string;
+  rules: AccessRule[];
   catalog: ServiceCatalog;
   derivation: string;
 }
@@ -62,90 +67,88 @@ export interface ResourceNames {
 }
 
 export interface Composition {
-  /** One rules file per service, keyed by service name. */
-  rules: Record<string, string>;
+  /** Each service's access rules, keyed by service name. */
+  rules: Record<string, AccessRule[]>;
   model: string;
   catalog: ServiceCatalog[];
   derivation: string;
-  problems: string[];
+  problems: Problem[];
   /** Resource name members whose service is not composed: they bind nothing until it is. */
-  unbound: string[];
+  unbound: Problem[];
 }
-
-const ruleIds = (rules: string): string[] =>
-  rules
-    .split('\n')
-    .filter((line) => line.startsWith('- id: '))
-    .map((line) => line.slice('- id: '.length).trim());
-
-const matchKeys = (rules: string): string[] => {
-  const keys: string[] = [];
-  let url: string | undefined;
-  for (const line of rules.split('\n')) {
-    const trimmed = line.trim();
-    if (trimmed.startsWith('url: ')) url = trimmed.slice('url: '.length);
-    else if (trimmed.startsWith('- ') && url !== undefined && /^- [A-Z]+$/.test(trimmed)) {
-      keys.push(`${trimmed.slice(2)} ${url}`);
-    }
-  }
-  return keys;
-};
 
 /**
  * The gateway loads one rules file. Services keep their own so a reviewer can
  * see whose rule is whose, and this is the order the gateway reads them in.
  */
-export const accessRules = (rules: Record<string, string>): string =>
-  Object.keys(rules)
-    .sort()
-    .map((service) => {
-      const text = rules[service] ?? '';
-      return text.endsWith('\n') ? text : `${text}\n`;
-    })
-    .join('');
+export const accessRules = (rules: Record<string, AccessRule[]>): string =>
+  stringify(
+    Object.keys(rules)
+      .sort()
+      .flatMap((service) => rules[service] ?? []),
+    { lineWidth: 0 },
+  );
 
-/** RFC 6901: the whole document, or a token path from its root. */
-const isPointer = (value: string): boolean => value === '' || value.startsWith('/');
+const HTTP_PROTOCOLS: readonly string[] = ['http:', 'https:'];
+
+/** RFC 6901, as the reader of the source resolves it. */
+const isPointer = (value: string): boolean => {
+  try {
+    JsonPointer.decode(value);
+    return true;
+  } catch {
+    return false;
+  }
+};
 
 /**
  * A source is a claim that one composed operation answers this noun's whole
  * id set. Everything the claim rests on is checkable here, and a claim that
  * does not hold is a sync that would write ids nothing can grant.
  */
-export const sourceProblems = (label: string, name: ResourceName): string[] => {
+export const sourceProblems = (label: string, name: ResourceName): Problem[] => {
   const source = name.source;
   if (source === undefined) return [];
 
-  const problems: string[] = [];
-  try {
-    const url = new URL(source.url);
-    if (url.protocol !== 'http:' && url.protocol !== 'https:') throw new Error();
-  } catch {
-    problems.push(`resource name ${label}: source.url "${source.url ?? ''}" is not an http(s) URL`);
+  const messages: string[] = [];
+  const url = URL.parse(source.url);
+  if (url === null || !HTTP_PROTOCOLS.includes(url.protocol)) {
+    messages.push(`resource name ${label}: source.url "${source.url ?? ''}" is not an http(s) URL`);
   }
 
   for (const [key, value] of [['list', source.list], ['id', source.id], ['label', source.label]] as const) {
     if (value !== undefined && !isPointer(value)) {
-      problems.push(`resource name ${label}: source.${key} "${value}" is not a JSON Pointer ("" or /...)`);
+      messages.push(`resource name ${label}: source.${key} "${value}" is not a JSON Pointer ("" or /...)`);
     }
   }
   if (source.id === undefined) {
-    problems.push(`resource name ${label}: source.id must point at the id within each item`);
+    messages.push(`resource name ${label}: source.id must point at the id within each item`);
   }
-  return problems;
+  return messages.map((message) => ({ message, resourceNames: [label] }));
+};
+
+/** The services each resource name lists, by service, with the type each spells it as. */
+export const membersByService = (names: ResourceNames): Map<string, Map<string, string>> => {
+  const byService = new Map<string, Map<string, string>>();
+  for (const [resourceName, declared] of Object.entries(names.resourceNames ?? {})) {
+    for (const member of declared.members) {
+      const types = byService.get(member.service) ?? new Map<string, string>();
+      types.set(member.type, resourceName);
+      byService.set(member.service, types);
+    }
+  }
+  return byService;
 };
 
 export function compose(services: ComposedService[], names: ResourceNames = {}): Composition {
-  const problems: string[] = [];
+  const problems: Problem[] = [];
 
   const seenService = new Map<string, number>();
   const seenNamespace = new Map<string, string>();
   const seenPermission = new Map<string, string>();
-  const seenMatch = new Map<string, string>();
+  const seenMatch = new Map<string, Map<string, string>>();
 
-  const known = new Set(
-    Object.values(names.resourceNames ?? {}).flatMap((n) => n.members.map((m) => `${m.service}.${m.type}`)),
-  );
+  const known = membersByService(names);
 
   for (const service of services) {
     const name = service.bundle.service;
@@ -154,56 +157,69 @@ export function compose(services: ComposedService[], names: ResourceNames = {}):
     const namespace = ketoNamespace(name);
     const holder = seenNamespace.get(namespace);
     if (holder !== undefined && holder !== name) {
-      problems.push(`${holder} and ${name} are both Keto namespace ${namespace}`);
+      problems.push({ message: `${holder} and ${name} are both Keto namespace ${namespace}`, services: [holder, name] });
     } else seenNamespace.set(namespace, name);
 
     for (const permission of service.bundle.permissions) {
       const owner = seenPermission.get(permission.id);
-      if (owner !== undefined) problems.push(`permission ${permission.id} is claimed by ${owner} and ${name}`);
-      else seenPermission.set(permission.id, name);
+      if (owner !== undefined) {
+        problems.push({ message: `permission ${permission.id} is claimed by ${owner} and ${name}`, services: [owner, name] });
+      } else seenPermission.set(permission.id, name);
     }
 
-    for (const id of ruleIds(service.rules)) {
+    for (const { id } of service.rules) {
       const owner = seenPermission.get(id);
-      if (owner !== undefined && owner !== name) problems.push(`rule ${id} collides with ${owner}`);
+      if (owner !== undefined && owner !== name) problems.push({ message: `rule ${id} collides with ${owner}`, services: [owner, name] });
     }
 
     // Oathkeeper answers 500 when two rules match one request, so a match
     // claimed twice is a rollout that must not happen. Identical matches are
     // what registering two services on one host produces; a partial overlap
     // needs the live gateway to find and is caught by the conformance probe.
-    for (const key of matchKeys(service.rules)) {
-      const owner = seenMatch.get(key);
-      if (owner !== undefined) problems.push(`${name} and ${owner} both match ${key}`);
-      else seenMatch.set(key, name);
+    for (const { match } of service.rules) {
+      const methods = seenMatch.get(match.url) ?? new Map<string, string>();
+      for (const method of match.methods) {
+        const owner = methods.get(method);
+        if (owner !== undefined) {
+          problems.push({ message: `${name} and ${owner} both match ${method} ${match.url}`, services: [name, owner] });
+        } else methods.set(method, name);
+      }
+      seenMatch.set(match.url, methods);
     }
 
     // The vocabulary is total: every type a service is about is picked and
     // labelled by the noun that names it, so a type outside it is a grantable
     // thing the deployment never blessed.
     for (const type of service.bundle.resourceTypes) {
-      if (!known.has(`${name}.${type}`)) {
-        problems.push(`${name} is about ${type}, and no resource name lists ${name}.${type}`);
+      if (known.get(name)?.has(type) !== true) {
+        problems.push({ message: `${name} is about ${type}, and no resource name lists ${name}.${type}`, services: [name] });
       }
     }
   }
 
   for (const [name, count] of seenService) {
-    if (count > 1) problems.push(`service ${name} is registered ${count} times`);
+    if (count > 1) problems.push({ message: `service ${name} is registered ${count} times`, services: [name] });
   }
 
   // A resource name is an assertion about two services' vocabularies, and an
   // assertion nobody checks is a grant an operator writes that never binds
   // anything. Every member has to be a type its service is really about.
   const declaredBy = new Map(services.map((s) => [s.bundle.service, new Set(s.bundle.resourceTypes)]));
-  const unbound: string[] = [];
+  const unbound: Problem[] = [];
   for (const [label, name] of Object.entries(names.resourceNames ?? {})) {
     for (const member of name.members) {
       const types = declaredBy.get(member.service);
       if (types === undefined) {
-        unbound.push(`resource name ${label} lists ${member.service}, which this deployment does not compose`);
+        unbound.push({
+          message: `resource name ${label} lists ${member.service}, which this deployment does not compose`,
+          resourceNames: [label],
+        });
       } else if (!types.has(member.type)) {
-        problems.push(`resource name ${label} lists ${member.service}.${member.type}, which ${member.service} is not about`);
+        problems.push({
+          message: `resource name ${label} lists ${member.service}.${member.type}, which ${member.service} is not about`,
+          resourceNames: [label],
+          services: [member.service],
+        });
       }
     }
     problems.push(...sourceProblems(label, name));

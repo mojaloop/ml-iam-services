@@ -1,5 +1,6 @@
 import { difference, filterFor, KetoWriter } from '../../src/iam/keto';
-import { MEMBERS, ROLE_NAMESPACE, Tuple } from '../../src/iam/materialize';
+import { AUTHENTICATED, HELD_BY, MEMBERS, ROLE_NAMESPACE, SINGLETON, Tuple, TYPE_WIDE } from '../../src/iam/materialize';
+import { EXISTS, REGISTRY, registryTuple, RESOURCE_NAMESPACE } from '../../src/iam/registry';
 
 const KETO_WRITE_URL = process.env.KETO_WRITE_URL || 'http://localhost:4467';
 const KETO_READ_URL = process.env.KETO_READ_URL || 'http://localhost:4466';
@@ -92,5 +93,51 @@ describe('the Keto client against a running Keto', () => {
     );
 
     expect(await keto.query({ namespace: NAMESPACE, object: 'writer-a', relation: MEMBERS })).toHaveLength(1);
+  });
+});
+
+describe('the IAM words a tuple carries, through a running Keto', () => {
+  const keto = new KetoWriter(KETO_WRITE_URL, KETO_READ_URL);
+  const admin = { namespace: ROLE_NAMESPACE, object: 'words-admin', relation: MEMBERS };
+  const written: Tuple[] = [
+    { namespace: 'example', object: `Widget/${TYPE_WIDE}`, relation: 'getWidgetCa', subject_set: admin },
+    { namespace: 'example', object: SINGLETON, relation: 'getWidgets', subject_set: admin },
+    { namespace: ROLE_NAMESPACE, object: 'words-admin', relation: MEMBERS, subject_id: 'words-user' },
+    { namespace: ROLE_NAMESPACE, object: 'words-signed-in', relation: HELD_BY, subject_id: AUTHENTICATED },
+    registryTuple('words', 'p1'),
+  ];
+
+  beforeAll(() => keto.patch(written, []));
+  afterAll(() => keto.patch([], written));
+
+  it('checks a grant on the type-wide object and on the singleton, and nothing beside them', async () => {
+    await expect(keto.check('example', `Widget/${TYPE_WIDE}`, 'getWidgetCa', 'words-user')).resolves.toBe(true);
+    await expect(keto.check('example', SINGLETON, 'getWidgets', 'words-user')).resolves.toBe(true);
+    await expect(keto.check('example', 'Widget/w7', 'getWidgetCa', 'words-user')).resolves.toBe(false);
+    await expect(keto.check('example', `Widget/${TYPE_WIDE}`, 'getWidgetCa', 'someone-else')).resolves.toBe(false);
+  });
+
+  it('checks a subject set, as the decision asks about a role every subject holds', async () => {
+    await expect(keto.check('example', SINGLETON, 'getWidgets', admin)).resolves.toBe(true);
+  });
+
+  it('reads back by each reserved subject', async () => {
+    const roles = await keto.query({ namespace: ROLE_NAMESPACE, relation: HELD_BY, subject_id: AUTHENTICATED });
+    expect(roles.map((t) => t.object)).toContain('words-signed-in');
+
+    const registered = (await keto.query({ namespace: RESOURCE_NAMESPACE, relation: EXISTS, subject_id: REGISTRY }))
+      .map((t) => t.object)
+      .filter((object) => object.startsWith('words/'));
+    expect(registered).toEqual(['words/p1']);
+  });
+
+  it('reads back the type-wide and singleton objects as written', async () => {
+    const grants = await keto.query({
+      namespace: 'example',
+      'subject_set.namespace': ROLE_NAMESPACE,
+      'subject_set.object': 'words-admin',
+      'subject_set.relation': MEMBERS,
+    });
+    expect(grants.map((t) => t.object).sort()).toEqual([SINGLETON, `Widget/${TYPE_WIDE}`].sort());
   });
 });

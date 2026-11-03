@@ -157,7 +157,7 @@ describe('separation of duties within a resource', () => {
   });
 
   it('counts every resource as overlapping a grant over all of them', () => {
-    expect(broken([holding(maker('all')), holding(checker('dfsp2'))], [rule], index)).toHaveLength(1);
+    expect(broken([holding(maker('$all')), holding(checker('dfsp2'))], [rule], index)).toHaveLength(1);
   });
 
   it('reads a resource the role leaves open from the assignment that named it', () => {

@@ -1,7 +1,17 @@
 import { broken, heldInstances, holdingsOf } from './exclusions';
-import { difference, filterFor, KetoWriter } from './keto';
-import { KratosAdmin } from './kratos';
-import { materialize, materializeRole, MEMBERS, membership, parseInstance, ROLE_NAMESPACE, Tuple } from './materialize';
+import { difference, KetoWriter } from './keto';
+import { InvitationState, KratosAdmin } from './kratos';
+import {
+  HELD_BY,
+  heldByMarker,
+  materialize,
+  materializeRole,
+  MEMBERS,
+  membership,
+  parseInstance,
+  ROLE_NAMESPACE,
+  Tuple,
+} from './materialize';
 import { RESOURCE_NAMESPACE } from './registry';
 import { openResourceNames, PermissionIndex, RolesFile } from './roles';
 
@@ -33,6 +43,14 @@ export interface Applied {
   /** Holdings that break a rule the file now declares. */
   findings: Finding[];
   admin?: { email: string; id: string; created: boolean; invited: boolean };
+  /** Whose permissions this apply changed, whose sessions end. */
+  affected: Affected;
+}
+
+/** The subjects a write changed the permissions of, or everyone when it changed a role every signed-in subject holds. */
+export interface Affected {
+  everyone: boolean;
+  subjects: string[];
 }
 
 export interface Finding {
@@ -52,13 +70,13 @@ export interface ReconcileOptions {
  * a role's grants as the file said them at the time, so a change to the role
  * has to reach them or they keep answering the old way.
  */
-async function runtimeInstances(
-  keto: KetoWriter,
+function runtimeInstances(
+  held: Tuple[],
   file: RolesFile,
   index: PermissionIndex,
-): Promise<Array<{ role: string; resources: Record<string, string> }>> {
+): Array<{ role: string; resources: Record<string, string> }> {
   const seen = new Map<string, { role: string; resources: Record<string, string> }>();
-  for (const tuple of await keto.query({ namespace: ROLE_NAMESPACE, relation: MEMBERS })) {
+  for (const tuple of held) {
     const instance = parseInstance(tuple.object);
     const role = file.roles[instance.role];
     if (role === undefined || openResourceNames(role, index).length === 0) continue;
@@ -94,7 +112,7 @@ export async function applyRoles(
     const invited =
       options.admin.password === undefined &&
       options.admin.kratosPublicUrl !== undefined &&
-      (await kratos.invitationState(options.admin.email)) === 'none';
+      (await kratos.invitationState(options.admin.email)) === InvitationState.none;
     if (invited) await kratos.invite(options.admin.email);
     admin = { ...found, invited };
     tuples.push(membership(options.admin.role, admin.id));
@@ -102,8 +120,9 @@ export async function applyRoles(
 
   const modelled = await keto.namespaces();
   const held = await heldGrants(keto, modelled);
+  const heldMemberships = await keto.query({ namespace: ROLE_NAMESPACE, relation: MEMBERS });
 
-  const instances = await runtimeInstances(keto, file, index);
+  const instances = runtimeInstances(heldMemberships, file, index);
   for (const instance of instances) {
     tuples.push(...materializeRole(instance.role, file.roles[instance.role]!, index, instance.resources));
   }
@@ -112,11 +131,25 @@ export async function applyRoles(
     tuples.filter((t) => t.subject_set !== undefined),
     held,
   );
-  const memberships: Tuple[] = [];
-  for (const tuple of tuples.filter((t) => t.subject_id !== undefined)) {
-    if ((await keto.query(filterFor(tuple))).length === 0) memberships.push(tuple);
-  }
-  await keto.patch([...inserts, ...memberships], deletes);
+  const markers = difference(
+    Object.entries(file.roles)
+      .filter(([, role]) => role.heldBy !== undefined)
+      .map(([name]) => heldByMarker(name)),
+    await keto.query({ namespace: ROLE_NAMESPACE, relation: HELD_BY }),
+  );
+  const absent = difference(
+    tuples.filter((t) => t.subject_id !== undefined),
+    heldMemberships,
+  ).inserts;
+  await keto.patch([...inserts, ...markers.inserts, ...absent], [...deletes, ...markers.deletes]);
+
+  const changed = new Set([...inserts, ...deletes].flatMap((t) => (t.subject_set !== undefined ? [t.subject_set.object] : [])));
+  const everyone =
+    markers.inserts.length + markers.deletes.length > 0 ||
+    Object.entries(file.roles).some(([name, role]) => role.heldBy !== undefined && changed.has(heldByMarker(name).object));
+  const subjects = [...heldMemberships.filter((t) => changed.has(t.object)), ...absent].flatMap((t) =>
+    t.subject_id !== undefined ? [t.subject_id] : [],
+  );
 
   // Rules and holdings change at different times and only holdings pass
   // through a gate, so a rule added today meets combinations granted before it
@@ -138,6 +171,7 @@ export async function applyRoles(
     deleted: deletes.length,
     instances: instances.length,
     findings,
+    affected: { everyone, subjects: [...new Set(subjects)].sort() },
     ...(options.admin !== undefined && admin !== undefined
       ? { admin: { email: options.admin.email, ...admin } }
       : {}),

@@ -16,8 +16,16 @@ interface CourierMessage {
   status: string;
 }
 
-/** A Kratos answering the identity lookup, the creation, the courier's record and the recovery flow. */
-function fakeKratos(existing: Array<{ id: string }>, messages: CourierMessage[] = []): { server: Server; seen: Seen[] } {
+/**
+ * A Kratos answering the identity lookup, the creation, the courier's record
+ * and the recovery flow. The record comes in pages of `pageSize`, each naming
+ * the next in its Link header.
+ */
+function fakeKratos(
+  existing: Array<{ id: string }>,
+  messages: CourierMessage[] = [],
+  pageSize = Infinity,
+): { server: Server; seen: Seen[] } {
   const seen: Seen[] = [];
   const server = createServer((req: IncomingMessage, res) => {
     const chunks: Buffer[] = [];
@@ -28,7 +36,10 @@ function fakeKratos(existing: Array<{ id: string }>, messages: CourierMessage[] 
       seen.push({ method: req.method!, path: req.url!, body });
       res.setHeader('Content-Type', 'application/json');
       if (req.url!.startsWith('/admin/courier/messages')) {
-        return res.end(JSON.stringify(messages.map((m) => ({ ...m, recipient: 'admin@hub.example' }))));
+        const from = Number(new URL(req.url!, 'http://kratos').searchParams.get('page_token') ?? 0);
+        const to = Math.min(from + pageSize, messages.length);
+        if (to < messages.length) res.setHeader('Link', `</admin/courier/messages?page_token=${to}>; rel="next"`);
+        return res.end(JSON.stringify(messages.slice(from, to).map((m) => ({ ...m, recipient: 'admin@hub.example' }))));
       }
       if (req.url!.startsWith('/admin/identities?')) return res.end(JSON.stringify(existing));
       if (req.url! === '/admin/identities') return res.end(JSON.stringify({ id: 'created-id' }));
@@ -82,6 +93,23 @@ describe('the first admin', () => {
       const applied = await applyRoles(new MemoryKeto(), file, new Map(), adminOptions(url));
 
       expect(applied.admin).toEqual({ email: 'admin@hub.example', id: 'existing-id', created: false, invited: false });
+      expect(invitationOf(seen)).toBeUndefined();
+    });
+  });
+
+  it('holding an invitation the courier delivered on a later page of its record, is left alone', async () => {
+    const fake = fakeKratos(
+      [{ id: 'existing-id' }],
+      [
+        { template_type: 'verification_valid', status: 'sent' },
+        { template_type: 'recovery_valid', status: 'sent' },
+      ],
+      1,
+    );
+    await withKratos(fake, async (url, seen) => {
+      const applied = await applyRoles(new MemoryKeto(), file, new Map(), adminOptions(url));
+
+      expect(applied.admin?.invited).toBe(false);
       expect(invitationOf(seen)).toBeUndefined();
     });
   });

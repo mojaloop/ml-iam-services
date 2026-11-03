@@ -1,76 +1,73 @@
-import { createServer } from 'node:http';
-
-import request from 'supertest';
-
-const mockFetch = vi.fn();
-vi.stubGlobal('fetch', mockFetch);
-
-vi.mock('../../src/decision/config', () => ({
-  config: { port: 3002, ketoReadUrl: 'http://keto-read-test', scopeAlarm: 500 },
-}));
+import { parseScope } from '@mojaloop/authz/gateway';
+import { ALL } from '@mojaloop/authz/reserved';
+import { FastifyInstance } from 'fastify';
 
 import { parsePayload } from '../../src/decision/payload';
-import { handleRequest } from '../../src/decision/server';
+import { buildServer } from '../../src/decision/server';
+import { AUTHENTICATED, HELD_BY, MEMBERS, ROLE_NAMESPACE, Tuple } from '../../src/iam/materialize';
+import { MemoryKeto } from './memory-keto';
 
-const app = createServer((req, res) => {
-  handleRequest(req, res).catch(() => {
-    res.writeHead(403).end();
+const keto = new MemoryKeto();
+const app = buildServer(keto);
+const checks = vi.spyOn(keto, 'check');
+const queries = vi.spyOn(keto, 'query');
+
+const sent = async (method: 'GET' | 'POST', url: string, body?: unknown, server: FastifyInstance = app) => {
+  const response = await server.inject({
+    method,
+    url,
+    ...(body !== undefined ? { payload: JSON.stringify(body), headers: { 'content-type': 'application/json' } } : {}),
   });
-});
-
-const json = (body: unknown, status = 200) =>
-  Promise.resolve({ ok: status < 400, status, json: () => Promise.resolve(body) });
-
-/**
- * Answers the Keto read API the way the running server does: a check by
- * whether the exact tuple was granted, a query by filtering the same store.
- */
-const ketoStore = (tuples: Record<string, string[]>, roles: Record<string, string[]> = {}) => {
-  const holderOf = (object: string, relation: string) => tuples[`${object}#${relation}`] ?? [];
-  return (input: string) => {
-    const url = new URL(input);
-    if (url.pathname === '/relation-tuples/check') {
-      const object = url.searchParams.get('object')!;
-      const relation = url.searchParams.get('relation')!;
-      const subject = url.searchParams.get('subject_id')!;
-      const holders = holderOf(object, relation);
-      const allowed = holders.includes(subject) || (roles[subject] ?? []).some((r) => holders.includes(r));
-      return json({ allowed }, allowed ? 200 : 403);
-    }
-    if (url.pathname === '/relation-tuples') {
-      const namespace = url.searchParams.get('namespace')!;
-      const role = url.searchParams.get('subject_set.object');
-      const subjectId = url.searchParams.get('subject_id');
-      if (namespace === 'Role') {
-        return json({
-          relation_tuples: (roles[subjectId!] ?? []).map((object) => ({
-            namespace: 'Role',
-            object,
-            relation: 'members',
-            subject_id: subjectId,
-          })),
-        });
-      }
-      const wanted = role ?? subjectId!;
-      const matches = Object.entries(tuples)
-        .filter(([, holders]) => holders.includes(wanted))
-        .map(([key]) => {
-          const [object, relation] = key.split('#');
-          return { namespace, object: object!, relation: relation! };
-        });
-      return json({ relation_tuples: matches });
-    }
-    throw new Error(`unexpected path ${url.pathname}`);
+  const scope = parseScope(response.headers as Record<string, string | undefined>);
+  return {
+    status: response.statusCode,
+    scope: Object.fromEntries([...scope].map(([type, entry]) => [type, entry.all ? ALL : entry.ids])),
   };
 };
 
-const post = (body: unknown) => request(app).post('/').send(body as object);
+/**
+ * What the IAM writes into Keto: each grant to a role's members, the roles a
+ * subject is a member of, and the roles every authenticated subject holds.
+ */
+const holding = (
+  namespace: string,
+  grants: Record<string, string[]>,
+  members: Record<string, string[]> = {},
+  everyone: string[] = [],
+): void => {
+  const membership = (role: string, subject: string): Tuple => ({
+    namespace: ROLE_NAMESPACE,
+    object: role,
+    relation: MEMBERS,
+    subject_id: subject,
+  });
+  keto.tuples = [
+    ...Object.entries(grants).flatMap(([key, roles]) => {
+      const [object, relation] = key.split('#') as [string, string];
+      return roles.map((role) => ({
+        namespace,
+        object,
+        relation,
+        subject_set: { namespace: ROLE_NAMESPACE, object: role, relation: MEMBERS },
+      }));
+    }),
+    ...Object.entries(members).flatMap(([subject, roles]) => roles.map((role) => membership(role, subject))),
+    ...everyone.map((role) => ({ namespace: ROLE_NAMESPACE, object: role, relation: HELD_BY, subject_id: AUTHENTICATED })),
+  ];
+};
+
+const post = (body: unknown) => sent('POST', '/', body);
 
 describe('parsePayload', () => {
   const check = { namespace: 'mcm', object: 'dfsps/a', relation: 'updateDFSP', subject_id: 'u1' };
 
   it('reads a plain check', () => {
     expect(parsePayload(check)).toEqual({ checks: [check], scope: [] });
+  });
+
+  it('reads a scope pair `$resources` brought in', () => {
+    const scope = [{ type: 'report', resourceName: 'report', followsAssignment: true }];
+    expect(parsePayload({ ...check, scope })).toEqual({ checks: [check], scope });
   });
 
   it('reads allOf with a scope', () => {
@@ -94,6 +91,7 @@ describe('parsePayload', () => {
     ['a scope that is not an array', { ...check, scope: 'dfsps' }],
     ['a scope holding a bare string', { ...check, scope: ['dfsps'] }],
     ['a scope pair missing its resource name', { ...check, scope: [{ type: 'dfsps' }] }],
+    ['a scope pair following its assignment by anything but true', { ...check, scope: [{ type: 'r', resourceName: 'r', followsAssignment: 'yes' }] }],
     [
       'a scope listing a type twice',
       {
@@ -111,60 +109,85 @@ describe('parsePayload', () => {
 
 describe('decision endpoint', () => {
   beforeEach(() => {
-    mockFetch.mockReset();
+    keto.tuples = [];
+    checks.mockClear();
+    queries.mockClear();
   });
 
   it('reports health without asking Keto', async () => {
-    const response = await request(app).get('/health');
+    const response = await sent('GET', '/health');
     expect(response.status).toBe(200);
-    expect(mockFetch).not.toHaveBeenCalled();
+    expect(checks).not.toHaveBeenCalled();
+    expect(queries).not.toHaveBeenCalled();
   });
 
   it('denies an unparseable payload without asking Keto', async () => {
     const response = await post({ namespace: 'mcm' });
     expect(response.status).toBe(403);
-    expect(response.headers['x-scope']).toBe('none');
-    expect(mockFetch).not.toHaveBeenCalled();
+    expect(response.scope).toEqual({});
+    expect(checks).not.toHaveBeenCalled();
+    expect(queries).not.toHaveBeenCalled();
   });
 
   it('allows a check granted on the resource itself', async () => {
-    mockFetch.mockImplementation(ketoStore({ 'dfsps/a#updateDFSP': ['u1'] }));
+    holding('mcm', { 'dfsps/a#updateDFSP': ['operator'] }, { u1: ['operator'] });
     const response = await post({ namespace: 'mcm', object: 'dfsps/a', relation: 'updateDFSP', subject_id: 'u1' });
     expect(response.status).toBe(200);
-    expect(response.headers['x-scope']).toBe('none');
+    expect(response.scope).toEqual({});
   });
 
   it('allows a check granted on the type-wide object', async () => {
-    mockFetch.mockImplementation(ketoStore({ 'dfsps/__all__#updateDFSP': ['u1'] }));
-    const response = await post({ namespace: 'mcm', object: 'dfsps/a', relation: 'updateDFSP', subject_id: 'u1' });
-    expect(response.status).toBe(200);
-  });
-
-  it('resolves a grant held by the caller role', async () => {
-    mockFetch.mockImplementation(ketoStore({ 'dfsps/a#updateDFSP': ['hub-admin'] }, { u1: ['hub-admin'] }));
+    holding('mcm', { 'dfsps/$all#updateDFSP': ['admin'] }, { u1: ['admin'] });
     const response = await post({ namespace: 'mcm', object: 'dfsps/a', relation: 'updateDFSP', subject_id: 'u1' });
     expect(response.status).toBe(200);
   });
 
   it('denies a check granted on a different resource', async () => {
-    mockFetch.mockImplementation(ketoStore({ 'dfsps/b#updateDFSP': ['u1'] }));
+    holding('mcm', { 'dfsps/b#updateDFSP': ['operator'] }, { u1: ['operator'] });
+    const response = await post({ namespace: 'mcm', object: 'dfsps/a', relation: 'updateDFSP', subject_id: 'u1' });
+    expect(response.status).toBe(403);
+  });
+
+  it('denies a grant held by a role the caller is not a member of', async () => {
+    holding('mcm', { 'dfsps/a#updateDFSP': ['operator'] }, { u2: ['operator'] });
     const response = await post({ namespace: 'mcm', object: 'dfsps/a', relation: 'updateDFSP', subject_id: 'u1' });
     expect(response.status).toBe(403);
   });
 
   it('has no wider form for the service singleton', async () => {
-    mockFetch.mockImplementation(ketoStore({ '__self__#getDFSPs': ['u1'] }));
-    const response = await post({ namespace: 'mcm', object: '__self__', relation: 'getDFSPs', subject_id: 'u1' });
+    const response = await post({ namespace: 'mcm', object: '$self', relation: 'getDFSPs', subject_id: 'u1' });
+    expect(response.status).toBe(403);
+    expect(checks.mock.calls.map(([, object]) => object)).toEqual(['$self']);
+  });
+
+  it('allows what a role every authenticated subject holds grants, with no membership', async () => {
+    holding('iam', { '$self#getChanges': ['signed-in'] }, {}, ['signed-in']);
+    const response = await post({ namespace: 'iam', object: '$self', relation: 'getChanges', subject_id: 'anyone' });
     expect(response.status).toBe(200);
-    const checked = mockFetch.mock.calls.map(([u]) => new URL(u as string).searchParams.get('object'));
-    expect(checked).toEqual(['__self__']);
+  });
+
+  it('denies what no role grants even when roles every subject holds exist', async () => {
+    holding('iam', { '$self#getChanges': ['signed-in'] }, {}, ['signed-in']);
+    const response = await post({ namespace: 'iam', object: '$self', relation: 'createRole', subject_id: 'anyone' });
+    expect(response.status).toBe(403);
+  });
+
+  it('scopes what a role every subject holds grants over', async () => {
+    holding('ledger', { '$self#listThings': ['signed-in'], 'participant/p1#listThings': ['signed-in'] }, {}, ['signed-in']);
+    const response = await post({
+      namespace: 'ledger',
+      object: '$self',
+      relation: 'listThings',
+      subject_id: 'anyone',
+      scope: [{ type: 'participants', resourceName: 'participant' }],
+    });
+    expect(response.status).toBe(200);
+    expect(response.scope).toEqual({ participants: ['p1'] });
   });
 
   it('allows allOf only when every check passes', async () => {
-    const both = { 'dfsps/a#linkDfsp': ['u1'], 'reports/r1#linkDfsp': ['u1'] };
-    const one = { 'dfsps/a#linkDfsp': ['u1'] };
-    const payload = (store: Record<string, string[]>) => {
-      mockFetch.mockImplementation(ketoStore(store));
+    const payload = (grants: Record<string, string[]>) => {
+      holding('mcm', grants, { u1: ['linker'] });
       return post({
         allOf: [
           { namespace: 'mcm', object: 'reports/r1', relation: 'linkDfsp', subject_id: 'u1' },
@@ -172,86 +195,112 @@ describe('decision endpoint', () => {
         ],
       });
     };
-    expect((await payload(both)).status).toBe(200);
-    mockFetch.mockReset();
-    expect((await payload(one)).status).toBe(403);
+    expect((await payload({ 'dfsps/a#linkDfsp': ['linker'], 'reports/r1#linkDfsp': ['linker'] })).status).toBe(200);
+    expect((await payload({ 'dfsps/a#linkDfsp': ['linker'] })).status).toBe(403);
   });
 
-  it('delivers the caller visible rows as the scope, spelled the service way', async () => {
-    mockFetch.mockImplementation(
-      ketoStore(
-        {
-          '__self__#getDFSPs': ['viewer'],
-          'Participant/b#getDFSPca': ['viewer'],
-          'Participant/a#updateDFSP': ['viewer'],
-          'Participant/z#updateDFSP': ['someone-else'],
-        },
-        { u1: ['viewer'] },
-      ),
+  it('delivers the rows the listing itself was granted over as the scope, spelled the service way', async () => {
+    holding(
+      'mcm',
+      {
+        '$self#getDFSPs': ['viewer'],
+        'Participant/a#getDFSPs': ['viewer'],
+        'Participant/b#getDFSPs': ['viewer'],
+        'Participant/z#getDFSPs': ['someone-else'],
+      },
+      { u1: ['viewer'] },
     );
     const response = await post({
       namespace: 'mcm',
-      object: '__self__',
+      object: '$self',
       relation: 'getDFSPs',
       subject_id: 'u1',
       scope: [{ type: 'dfsps', resourceName: 'Participant' }],
     });
     expect(response.status).toBe(200);
-    expect(response.headers['x-scope']).toBe('dfsps=a,b');
+    expect(response.scope).toEqual({ dfsps: ['a', 'b'] });
   });
 
-  it('collapses a resource-name-wide grant to a wildcard scope', async () => {
-    mockFetch.mockImplementation(
-      ketoStore({ '__self__#getDFSPs': ['admin'], 'Participant/__all__#updateDFSP': ['admin'], 'Participant/a#getDFSPca': ['admin'] }, { u1: ['admin'] }),
+  it('lends a listing none of the resources the same role grants another operation over', async () => {
+    holding(
+      'mcm',
+      { '$self#getDFSPs': ['observer'], 'Participant/a#getDFSPs': ['observer'], 'Participant/$all#getDfspJWSCerts': ['observer'] },
+      { u1: ['observer'] },
     );
     const response = await post({
       namespace: 'mcm',
-      object: '__self__',
+      object: '$self',
       relation: 'getDFSPs',
       subject_id: 'u1',
       scope: [{ type: 'dfsps', resourceName: 'Participant' }],
     });
-    expect(response.headers['x-scope']).toBe('dfsps=*');
+    expect(response.scope).toEqual({ dfsps: ['a'] });
+  });
+
+  it('collapses a resource-name-wide grant to the every-resource scope', async () => {
+    holding(
+      'mcm',
+      { '$self#getDFSPs': ['admin'], 'Participant/$all#getDFSPs': ['admin'], 'Participant/a#getDFSPs': ['admin'] },
+      { u1: ['admin'] },
+    );
+    const response = await post({
+      namespace: 'mcm',
+      object: '$self',
+      relation: 'getDFSPs',
+      subject_id: 'u1',
+      scope: [{ type: 'dfsps', resourceName: 'Participant' }],
+    });
+    expect(response.scope).toEqual({ dfsps: ALL });
   });
 
   it('denies a listing whose visible set is empty', async () => {
-    mockFetch.mockImplementation(ketoStore({ '__self__#getDFSPs': ['viewer'] }, { u1: ['viewer'] }));
+    holding('mcm', { '$self#getDFSPs': ['viewer'] }, { u1: ['viewer'] });
     const response = await post({
       namespace: 'mcm',
-      object: '__self__',
+      object: '$self',
       relation: 'getDFSPs',
       subject_id: 'u1',
       scope: [{ type: 'dfsps', resourceName: 'Participant' }],
     });
     expect(response.status).toBe(403);
-    expect(response.headers['x-scope']).toBe('none');
+    expect(response.scope).toEqual({});
   });
 
-  it('scopes a bound resource operation, so a write knows its caller', async () => {
-    mockFetch.mockImplementation(
-      ketoStore({ '__self__#postExternalCerts': ['dfsp-a-client'], 'Participant/a#updateDFSP': ['dfsp-a-client'] }, { m1: ['dfsp-a-client'] }),
+  it('scopes a write by its own grant, so it knows its caller whatever else the role reaches', async () => {
+    holding(
+      'mcm',
+      {
+        '$self#postExternalCerts': ['dfsp-a-client'],
+        'Participant/a#postExternalCerts': ['dfsp-a-client'],
+        'Participant/$all#getDfspStatus': ['dfsp-a-client'],
+      },
+      { m1: ['dfsp-a-client'] },
     );
     const response = await post({
       namespace: 'mcm',
-      object: '__self__',
+      object: '$self',
       relation: 'postExternalCerts',
       subject_id: 'm1',
       scope: [{ type: 'dfsps', resourceName: 'Participant' }],
     });
     expect(response.status).toBe(200);
-    expect(response.headers['x-scope']).toBe('dfsps=a');
+    expect(response.scope).toEqual({ dfsps: ['a'] });
   });
 
   it('joins several declared types into one header', async () => {
-    mockFetch.mockImplementation(
-      ketoStore(
-        { '__self__#getReportRows': ['auditor'], 'Participant/a#updateDFSP': ['auditor'], 'Report/r1#getReport': ['auditor'] },
-        { u1: ['auditor'] },
-      ),
+    holding(
+      'mcm',
+      {
+        '$self#getReportRows': ['auditor'],
+        'Participant/a#getReportRows': ['auditor'],
+        'Report/r1#getReportRows': ['auditor'],
+        'Report/r2#getReport': ['auditor'],
+      },
+      { u1: ['auditor'] },
     );
     const response = await post({
       namespace: 'mcm',
-      object: '__self__',
+      object: '$self',
       relation: 'getReportRows',
       subject_id: 'u1',
       scope: [
@@ -260,16 +309,18 @@ describe('decision endpoint', () => {
       ],
     });
     expect(response.status).toBe(200);
-    expect(response.headers['x-scope']).toBe('reports=r1;dfsps=a');
+    expect(response.scope).toEqual({ reports: ['r1'], dfsps: ['a'] });
   });
 
   it('denies when one declared type of several is empty', async () => {
-    mockFetch.mockImplementation(
-      ketoStore({ '__self__#getReportRows': ['auditor'], 'Report/r1#getReport': ['auditor'] }, { u1: ['auditor'] }),
+    holding(
+      'mcm',
+      { '$self#getReportRows': ['auditor'], 'Report/r1#getReportRows': ['auditor'], 'Participant/a#updateDFSP': ['auditor'] },
+      { u1: ['auditor'] },
     );
     const response = await post({
       namespace: 'mcm',
-      object: '__self__',
+      object: '$self',
       relation: 'getReportRows',
       subject_id: 'u1',
       scope: [
@@ -278,7 +329,25 @@ describe('decision endpoint', () => {
       ],
     });
     expect(response.status).toBe(403);
-    expect(response.headers['x-scope']).toBe('none');
+    expect(response.scope).toEqual({});
+  });
+
+  it('answers a name `$resources` brought in that the caller reaches none of as reaching none, and admits the request', async () => {
+    holding('iam', { '$self#assignRole': ['dfsp-admin@participant=a'], 'participant/a#assignRole': ['dfsp-admin@participant=a'] }, {
+      u1: ['dfsp-admin@participant=a'],
+    });
+    const response = await post({
+      namespace: 'iam',
+      object: '$self',
+      relation: 'assignRole',
+      subject_id: 'u1',
+      scope: [
+        { type: 'participant', resourceName: 'participant', followsAssignment: true },
+        { type: 'report', resourceName: 'report', followsAssignment: true },
+      ],
+    });
+    expect(response.status).toBe(200);
+    expect(response.scope).toEqual({ participant: ['a'], report: [] });
   });
 
   /**
@@ -287,7 +356,8 @@ describe('decision endpoint', () => {
    * not reach an operation only the other granted.
    */
   it('takes the scope from the roles that admitted the request', async () => {
-    const store = ketoStore(
+    holding(
+      'reports',
       {
         'Report/settlement#getReport': ['viewer@dfsp-a'],
         'Participant/dfsp-a#getReport': ['viewer@dfsp-a'],
@@ -296,10 +366,8 @@ describe('decision endpoint', () => {
       },
       { u1: ['viewer@dfsp-a', 'viewer@dfsp-b'] },
     );
-    const run = (report: string) => {
-      mockFetch.mockReset();
-      mockFetch.mockImplementation(store);
-      return post({
+    const run = (report: string) =>
+      post({
         namespace: 'reports',
         object: `Report/${report}`,
         relation: 'getReport',
@@ -309,24 +377,29 @@ describe('decision endpoint', () => {
           { type: 'participants', resourceName: 'Participant' },
         ],
       });
-    };
 
     const settlement = await run('settlement');
     expect(settlement.status).toBe(200);
-    expect(settlement.headers['x-scope']).toBe('reports=settlement;participants=dfsp-a');
+    expect(settlement.scope).toEqual({ reports: ['settlement'], participants: ['dfsp-a'] });
 
     const window = await run('window');
     expect(window.status).toBe(200);
-    expect(window.headers['x-scope']).toBe('reports=window;participants=dfsp-b');
+    expect(window.scope).toEqual({ reports: ['window'], participants: ['dfsp-b'] });
 
     const neither = await run('audit');
     expect(neither.status).toBe(403);
   });
 
   it('denies when Keto is unreachable', async () => {
-    mockFetch.mockRejectedValue(new Error('connect ECONNREFUSED'));
-    const response = await post({ namespace: 'mcm', object: 'dfsps/a', relation: 'updateDFSP', subject_id: 'u1' });
+    const unreachable = () => Promise.reject(new Error('connect ECONNREFUSED'));
+    const cut = buildServer({ check: unreachable, query: unreachable });
+    const response = await sent(
+      'POST',
+      '/',
+      { namespace: 'mcm', object: 'dfsps/a', relation: 'updateDFSP', subject_id: 'u1' },
+      cut,
+    );
     expect(response.status).toBe(403);
-    expect(response.headers['x-scope']).toBe('none');
+    expect(response.scope).toEqual({});
   });
 });

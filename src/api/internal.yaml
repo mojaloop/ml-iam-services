@@ -1,0 +1,294 @@
+openapi: 3.1.0
+info:
+  title: IAM internal
+  version: 1.0.0
+  description: >-
+    The provisioning authority's API: it records that a resource exists,
+    creates the people and machine clients that operate it, and assigns them
+    the roles the deployment configured into the authority. Reachable only by
+    what a network rule names, never through the gateway, so no operation
+    here is a permission.
+
+servers:
+  - url: /
+
+components:
+  schemas:
+    ResourceRef:
+      type: object
+      required: [resourceName, id]
+      additionalProperties: false
+      properties:
+        resourceName:
+          type: string
+          minLength: 1
+        id:
+          type: string
+          minLength: 1
+    Assignment:
+      type: object
+      required: [role]
+      additionalProperties: false
+      properties:
+        role:
+          type: string
+          minLength: 1
+        resources:
+          type: object
+          additionalProperties:
+            type: string
+            minLength: 1
+    ClientSecret:
+      type: object
+      required: [subject, secret]
+      properties:
+        subject:
+          description: The client id, which is the subject roles are assigned to
+          type: string
+        secret:
+          type: string
+    Problems:
+      type: object
+      required: [errors]
+      properties:
+        errors:
+          type: array
+          items:
+            type: string
+  responses:
+    Refused:
+      description: Refused, with the reasons
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Problems'
+
+paths:
+  /health:
+    get:
+      operationId: getHealth
+      summary: Reports whether the API is running
+      responses:
+        '200':
+          description: The API is running
+
+  /provision:
+    post:
+      operationId: provisionResource
+      summary: Records that a resource exists
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ResourceRef'
+      responses:
+        '200':
+          description: The resource is recorded
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ResourceRef'
+        '422':
+          $ref: '#/components/responses/Refused'
+    delete:
+      operationId: deprovisionResource
+      summary: Removes a resource and every role instance over it
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ResourceRef'
+      responses:
+        '200':
+          description: The subjects now holding no role at all, for the caller to retire
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [orphaned]
+                properties:
+                  orphaned:
+                    type: array
+                    items:
+                      type: string
+        '422':
+          $ref: '#/components/responses/Refused'
+
+  /accounts:
+    post:
+      operationId: createAccount
+      summary: Finds or creates a person, and invites a new one by email
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [email]
+              additionalProperties: false
+              properties:
+                email:
+                  type: string
+                  format: email
+                name:
+                  type: string
+      responses:
+        '200':
+          description: The person's subject id, and whether they were created and invited
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [subject, created, invited]
+                properties:
+                  subject:
+                    type: string
+                  created:
+                    type: boolean
+                  invited:
+                    type: boolean
+        '422':
+          $ref: '#/components/responses/Refused'
+
+  /accounts/{subject}:
+    parameters:
+      - name: subject
+        in: path
+        required: true
+        schema:
+          type: string
+    delete:
+      operationId: deleteAccount
+      summary: Retires a person who holds no role
+      responses:
+        '204':
+          description: The person is gone, or was never there
+        '409':
+          $ref: '#/components/responses/Refused'
+
+  /clients:
+    post:
+      operationId: createClient
+      summary: Creates a machine client, answering its secret once
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              properties:
+                id:
+                  description: The client id to use; the IAM picks one when omitted.
+                  type: string
+                  minLength: 1
+                name:
+                  type: string
+                audience:
+                  type: array
+                  items:
+                    type: string
+      responses:
+        '201':
+          description: The client's id and secret; the secret is not kept anywhere it can be read again
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ClientSecret'
+        '409':
+          $ref: '#/components/responses/Refused'
+        '422':
+          $ref: '#/components/responses/Refused'
+
+  /clients/{subject}/secret:
+    parameters:
+      - name: subject
+        in: path
+        required: true
+        schema:
+          type: string
+    post:
+      operationId: rotateClientSecret
+      summary: Gives a machine client a new secret, answering it once
+      responses:
+        '200':
+          description: The client's id and its new secret
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ClientSecret'
+        '404':
+          $ref: '#/components/responses/Refused'
+
+  /clients/{subject}:
+    parameters:
+      - name: subject
+        in: path
+        required: true
+        schema:
+          type: string
+    delete:
+      operationId: deleteClient
+      summary: Retires a machine client who holds no role
+      responses:
+        '204':
+          description: The client is gone, or was never there
+        '409':
+          $ref: '#/components/responses/Refused'
+
+  /subjects/{subject}/assignments:
+    parameters:
+      - name: subject
+        in: path
+        required: true
+        schema:
+          type: string
+    post:
+      operationId: assignRole
+      summary: Gives a subject a role
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/Assignment'
+      responses:
+        '200':
+          description: The role instance the subject now holds
+        '422':
+          $ref: '#/components/responses/Refused'
+    delete:
+      operationId: unassignRole
+      summary: Takes a role from a subject
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/Assignment'
+      responses:
+        '200':
+          description: The role instance the subject no longer holds
+        '422':
+          $ref: '#/components/responses/Refused'
+
+  /login:
+    post:
+      operationId: login
+      summary: Writes what a person who just signed in holds into their Kratos identity, for their session to carry
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [identity_id]
+              properties:
+                identity_id:
+                  type: string
+                  minLength: 1
+      responses:
+        '204':
+          description: The person's permissions are written

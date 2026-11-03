@@ -13,6 +13,22 @@ services:
       timeout: 5s
       retries: 5
 
+  hydra:
+    image: oryd/hydra:v26.2.0
+    command: serve all --dev
+    environment:
+      DSN: memory
+      URLS_SELF_ISSUER: http://localhost:4444/
+      SECRETS_SYSTEM: integration-tests-only-system-secret
+    ports:
+      - "4444:4444"
+      - "4445:4445"
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost:4445/health/ready"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
   kratos:
     image: oryd/kratos:v26.2.0
     command: serve -c /etc/kratos/config.yaml --dev --watch-courier
@@ -27,30 +43,3 @@ services:
       interval: 5s
       timeout: 5s
       retries: 5
-
-  keto-batch-auth:
-    build: .
-    command: ["keto-batch-auth"]
-    environment:
-      PORT: "3000"
-      KETO_READ_URL: "http://keto:4466"
-    ports:
-      - "3000:3000"
-    depends_on:
-      keto:
-        condition: service_healthy
-
-  kratos-role-webhook:
-    build: .
-    command: ["kratos-role-webhook"]
-    environment:
-      PORT: "8080"
-      KETO_READ_URL: "http://keto:4466"
-      KRATOS_ADMIN_URL: "http://kratos:4434"
-    ports:
-      - "8080:8080"
-    depends_on:
-      keto:
-        condition: service_healthy
-      kratos:
-        condition: service_healthy

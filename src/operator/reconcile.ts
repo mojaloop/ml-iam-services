@@ -1,5 +1,8 @@
+import { isDeepStrictEqual } from 'node:util';
+
 import { clientPath, emitCatalog, generate, reachesSubtree, Rewrite } from '../authzgen';
 import { compose, ComposedService, Composition, ResourceNames } from '../authzgen/compose';
+import { describeObject, ObjectRef, Problem, sameObject } from '../authzgen/problem';
 import { Reach, reaches } from './routes';
 
 /**
@@ -12,16 +15,22 @@ import { Reach, reaches } from './routes';
  * composes and publishes.
  */
 
+/** Where a backend's document is read: the backend's own URL, or the AuthzDocument its route names. */
+export type DocumentSource = { url: string } | { schema: ObjectRef };
+
+const describeSource = (source: DocumentSource): string =>
+  'url' in source ? source.url : `AuthzDocument/${describeObject(source.schema)}`;
+
 /** One keyed backend, as one route sends traffic to it. */
 export interface Declared {
   /** Where it came from, for a message an operator can act on. */
   origin: string;
   /** The permission prefix the route gives the backend. */
   service: string;
-  /** `<namespace>/<name>` of the Service: the prefix's one source. */
-  backend: string;
-  /** Where its document is read: the backend's own URL, or the AuthzDocument the route names. */
-  source: string;
+  route: ObjectRef;
+  /** The Service: the prefix's one source. */
+  backend: ObjectRef;
+  source: DocumentSource;
   /** The parsed OpenAPI document, absent when it could not be read. */
   document?: unknown;
   /** Why the document could not be read; the prefix is held. */
@@ -36,7 +45,7 @@ export interface Reconciled {
   /** What every prefix together describes, when the prefixes agree with one another. */
   composition?: Composition;
   /** Every problem, held prefixes' included. */
-  problems: string[];
+  problems: Problem[];
   /** Prefixes kept at their last composed state because something about them is wrong. */
   held: string[];
   /** Which origins were read. */
@@ -45,47 +54,86 @@ export interface Reconciled {
   services: Record<string, ComposedService>;
 }
 
-const rewriteKey = (rewrite?: Rewrite): string => (rewrite === undefined ? '' : `${rewrite.from}→${rewrite.to}`);
+const NO_REWRITE = 'none';
+const NO_DOCUMENT = 'no document';
+
+const describeRewrite = (rewrite?: Rewrite): string => (rewrite === undefined ? NO_REWRITE : `${rewrite.from}→${rewrite.to}`);
+
+const uniqueBy = <T>(items: T[], same: (a: T, b: T) => boolean): T[] =>
+  items.filter((item, at) => items.findIndex((other) => same(item, other)) === at);
+
+const documentOf = (entry: Declared): ObjectRef[] => ('schema' in entry.source ? [entry.source.schema] : []);
 
 /** Composes one prefix, or says why it cannot. */
-function composeOne(entries: Declared[], names: ResourceNames): { service?: ComposedService; problems: string[] } {
+function composeOne(
+  entries: Declared[],
+  names: ResourceNames,
+  servesAs: string | undefined,
+): { service?: ComposedService; problems: Problem[] } {
   const value = entries[0]!.service;
-  const origins = [...new Set(entries.map((e) => e.origin))].join(', ');
-  const sources = [...new Set(entries.map((e) => e.backend))].sort();
+  const origins = uniqueBy(entries, (a, b) => sameObject(a.route, b.route) && sameObject(a.backend, b.backend))
+    .map((e) => e.origin)
+    .join(', ');
+  const about = {
+    services: [value],
+    routes: uniqueBy(
+      entries.map((e) => e.route),
+      sameObject,
+    ),
+    documents: uniqueBy(entries.flatMap(documentOf), sameObject),
+  };
+  const refused = (message: string) => ({ problems: [{ message, ...about }] });
+
+  const backends = uniqueBy(
+    entries.map((e) => e.backend),
+    sameObject,
+  );
+  if (backends.length > 1) {
+    return refused(`${origins}: ${value} is keyed on ${backends.map(describeObject).sort().join(' and ')}; a prefix belongs to one Service`);
+  }
+
+  const sources = uniqueBy(
+    entries.map((e) => e.source),
+    isDeepStrictEqual,
+  );
   if (sources.length > 1) {
-    return { problems: [`${origins}: ${value} is keyed on ${sources.join(' and ')}; a prefix belongs to one Service`] };
+    return refused(`${origins}: ${value} is read from ${sources.map(describeSource).sort().join(' and ')}; a prefix has one document`);
   }
 
-  const documents = [...new Set(entries.map((e) => e.source))].sort();
-  if (documents.length > 1) {
-    return { problems: [`${origins}: ${value} is read from ${documents.join(' and ')}; a prefix has one document`] };
-  }
-
-  const byHosts = new Map<string, Set<string>>();
+  const byHosts: Array<{ hosts: string[]; mounts: Reach['matches'] }> = [];
   for (const entry of entries) {
-    const hosts = [...entry.hosts].sort().join(',');
-    const mounts = byHosts.get(hosts) ?? new Set<string>();
-    for (const reach of entry.reaches) for (const match of reach.matches) mounts.add(JSON.stringify(match));
-    byHosts.set(hosts, mounts);
+    const hosts = [...entry.hosts].sort();
+    let group = byHosts.find((g) => isDeepStrictEqual(g.hosts, hosts));
+    if (group === undefined) {
+      group = { hosts, mounts: [] };
+      byHosts.push(group);
+    }
+    group.mounts = uniqueBy([...group.mounts, ...entry.reaches.flatMap((reach) => reach.matches)], isDeepStrictEqual);
   }
-  const shapes = new Set([...byHosts.values()].map((mounts) => [...mounts].sort().join('|')));
-  if (shapes.size > 1) {
-    return {
-      problems: [`${origins}: ${value} is reached through different paths on ${[...byHosts.keys()].sort().join(' and ')}`],
-    };
+  if (byHosts.some((g) => !isDeepStrictEqual(new Set(g.mounts), new Set(byHosts[0]!.mounts)))) {
+    const hosts = byHosts.map((g) => g.hosts.join(',')).sort();
+    return refused(`${origins}: ${value} is reached through different paths on ${hosts.join(' and ')}`);
   }
 
   const unread = entries.filter((e) => e.problem !== undefined || e.document === undefined);
   if (unread.length > 0) {
-    return { problems: unread.map((e) => `${e.origin}: ${e.problem ?? 'no document'}`) };
+    return {
+      problems: unread.map((e) => ({
+        message: `${e.origin}: ${e.problem ?? NO_DOCUMENT}`,
+        services: [value],
+        routes: [e.route],
+        documents: documentOf(e),
+      })),
+    };
   }
 
   const reached = entries.flatMap((e) => e.reaches);
-  const rewrites = [...new Set(reached.map((r) => rewriteKey(r.rewrite)))];
+  const rewrites = uniqueBy(
+    reached.map((r) => r.rewrite),
+    isDeepStrictEqual,
+  );
   if (rewrites.length > 1) {
-    return {
-      problems: [`${origins}: ${value} is reached through different rewrites (${rewrites.map((r) => r || 'none').join(', ')})`],
-    };
+    return refused(`${origins}: ${value} is reached through different rewrites (${rewrites.map(describeRewrite).join(', ')})`);
   }
   const rewrite = reached[0]?.rewrite;
 
@@ -99,7 +147,7 @@ function composeOne(entries: Declared[], names: ResourceNames): { service?: Comp
     const result = generate(
       entries[0]!.document,
       value,
-      { hosts, ...(rewrite !== undefined ? { rewrite } : {}), exclude, within },
+      { hosts, ...(rewrite !== undefined ? { rewrite } : {}), exclude, within, caller: value === servesAs },
       names,
       (permission, basePath) => {
         const path = clientPath(`${basePath}${permission.path}`, rewrite);
@@ -111,9 +159,7 @@ function composeOne(entries: Declared[], names: ResourceNames): { service?: Comp
       },
     );
     if (result.bundle.permissions.length === 0) {
-      return {
-        problems: [`${origins}: no operation of ${value}'s document is reached by its routes`],
-      };
+      return refused(`${origins}: no operation of ${value}'s document is reached by its routes`);
     }
     return {
       service: {
@@ -125,7 +171,7 @@ function composeOne(entries: Declared[], names: ResourceNames): { service?: Comp
       problems: [],
     };
   } catch (error) {
-    return { problems: [`${origins}: ${(error as Error).message}`] };
+    return refused(`${origins}: ${(error as Error).message}`);
   }
 }
 
@@ -139,17 +185,18 @@ export function reconcile(
   declared: Declared[],
   names: ResourceNames = {},
   previous?: { services?: Record<string, ComposedService> },
+  servesAs?: string,
 ): Reconciled {
   const origins = declared.map((d) => d.origin);
   const byValue = new Map<string, Declared[]>();
   for (const entry of declared) byValue.set(entry.service, [...(byValue.get(entry.service) ?? []), entry]);
 
-  const problems: string[] = [];
+  const problems: Problem[] = [];
   const held: string[] = [];
   const services: Record<string, ComposedService> = {};
 
   for (const [value, entries] of [...byValue].sort(([a], [b]) => a.localeCompare(b))) {
-    const one = composeOne(entries, names);
+    const one = composeOne(entries, names, servesAs);
     if (one.service !== undefined) {
       services[value] = one.service;
       continue;

@@ -1,9 +1,18 @@
 import { createHash } from 'node:crypto';
+import { isDeepStrictEqual } from 'node:util';
 
+import { StatusCodes } from 'http-status-codes';
 import { GenericClass, GenericKind, K8s, kind, RegisterKind, WatchCfg } from 'kubernetes-fluent-client';
+import { WatchPhase } from 'kubernetes-fluent-client/dist/fluent/shared-types';
 
+import { Localized } from '../authzgen/compose';
+import { ObjectRef } from '../authzgen/problem';
+import type { LeaseRecord, LeaseSpec, LeaseStore } from '../controller/leader';
 import { Condition } from '../iam/conditions';
-import { HTTPRouteResource } from './routes';
+import { Within } from '../iam/exclusions';
+import { COMPONENT, GROUP, Kind, MANAGED_BY, VERSION } from '../iam/kinds';
+import { HeldBy } from '../iam/roles';
+import { GATEWAY_KIND, HTTPRouteResource } from './routes';
 import { AuthzDocumentResource } from './sources';
 
 /**
@@ -12,7 +21,7 @@ import { AuthzDocumentResource } from './sources';
  * names, and where the result is published and reported.
  */
 
-export const GROUP = 'iam.mojaloop.io';
+export { GROUP, MANAGED_BY } from '../iam/kinds';
 
 export interface ObjectStatus {
   observedGeneration?: number;
@@ -27,9 +36,9 @@ export class AuthzDocument extends GenericKind {
 
 export class AuthzRole extends GenericKind {
   declare spec?: {
-    title?: string;
-    description?: string;
-    heldBy?: 'authenticated';
+    title?: Localized;
+    description?: Localized;
+    heldBy?: HeldBy;
     grants?: Array<{ permission: string; resources?: Record<string, string | string[]> }>;
   };
   declare status?: ObjectStatus;
@@ -37,8 +46,8 @@ export class AuthzRole extends GenericKind {
 
 export class AuthzSeparation extends GenericKind {
   declare spec?: {
-    description?: string;
-    within?: 'subject' | 'resource';
+    description?: Localized;
+    within?: Within;
     resourceName?: string;
     groups?: string[][];
   };
@@ -55,37 +64,102 @@ export class AuthzResourceName extends GenericKind {
   declare status?: ObjectStatus;
 }
 
-for (const [model, name, plural] of [
-  [AuthzDocument, 'AuthzDocument', 'authzdocuments'],
-  [AuthzRole, 'AuthzRole', 'authzroles'],
-  [AuthzSeparation, 'AuthzSeparation', 'authzseparations'],
-  [AuthzResourceName, 'AuthzResourceName', 'authzresourcenames'],
+for (const [model, name] of [
+  [AuthzDocument, Kind.document],
+  [AuthzRole, Kind.role],
+  [AuthzSeparation, Kind.separation],
+  [AuthzResourceName, Kind.resourceName],
 ] as const) {
-  RegisterKind(model, { group: GROUP, version: 'v1', kind: name, plural });
+  RegisterKind(model, { group: GROUP, version: VERSION, kind: name, plural: `${name.toLowerCase()}s` });
 }
 
 export type DeploymentKind = typeof AuthzDocument | typeof AuthzRole | typeof AuthzSeparation | typeof AuthzResourceName;
+
+const GATEWAY_API = { group: 'gateway.networking.k8s.io', version: 'v1' } as const;
+const ROUTE_KIND = 'HTTPRoute';
 
 export class HTTPRoute extends GenericKind {
   declare spec?: HTTPRouteResource['spec'];
 }
 
-RegisterKind(HTTPRoute, {
-  group: 'gateway.networking.k8s.io',
-  version: 'v1',
-  kind: 'HTTPRoute',
-  plural: 'httproutes',
-});
+RegisterKind(HTTPRoute, { ...GATEWAY_API, kind: ROUTE_KIND, plural: 'httproutes' });
 
 export class Gateway extends GenericKind {
   declare spec?: { listeners?: Array<{ name?: string; hostname?: string }> };
 }
 
-RegisterKind(Gateway, {
-  group: 'gateway.networking.k8s.io',
+RegisterKind(Gateway, { ...GATEWAY_API, kind: GATEWAY_KIND, plural: 'gateways' });
+
+export class Lease extends GenericKind {
+  declare spec?: {
+    holderIdentity?: string;
+    leaseDurationSeconds?: number;
+    acquireTime?: string;
+    renewTime?: string;
+    leaseTransitions?: number;
+  };
+}
+
+RegisterKind(Lease, {
+  group: 'coordination.k8s.io',
   version: 'v1',
-  kind: 'Gateway',
-  plural: 'gateways',
+  kind: 'Lease',
+  plural: 'leases',
+});
+
+const recordOf = (lease: Lease): LeaseRecord => ({
+  ...(lease.spec?.holderIdentity ? { holder: lease.spec.holderIdentity } : {}),
+  ...(lease.spec?.leaseDurationSeconds !== undefined ? { durationSeconds: lease.spec.leaseDurationSeconds } : {}),
+  ...(lease.spec?.acquireTime ? { acquireTime: lease.spec.acquireTime } : {}),
+  ...(lease.spec?.renewTime ? { renewTime: lease.spec.renewTime } : {}),
+  ...(lease.spec?.leaseTransitions !== undefined ? { transitions: lease.spec.leaseTransitions } : {}),
+  version: lease.metadata!.resourceVersion!,
+});
+
+/** A Lease's times are MicroTime, RFC 3339 with six fractional digits. */
+const micro = (iso: string | undefined): string | undefined => iso?.replace(/\.(\d{3})Z$/, '.$1000Z');
+
+const leaseSpec = (spec: LeaseSpec): NonNullable<Lease['spec']> => ({
+  holderIdentity: spec.holder ?? '',
+  ...(spec.durationSeconds !== undefined ? { leaseDurationSeconds: spec.durationSeconds } : {}),
+  ...(spec.acquireTime !== undefined ? { acquireTime: micro(spec.acquireTime)! } : {}),
+  ...(spec.renewTime !== undefined ? { renewTime: micro(spec.renewTime)! } : {}),
+  ...(spec.transitions !== undefined ? { leaseTransitions: spec.transitions } : {}),
+});
+
+/**
+ * The Lease the controller's replicas elect their leader through. The release
+ * creates it, so the controller only reads, watches and patches that one
+ * object. A patch tests the version it was read at, so of two replicas
+ * writing at once exactly one lands.
+ */
+/** A lease write lands only on the version it read, and replaces the spec whole. */
+const UNCHANGED_SINCE = { op: 'test', path: '/metadata/resourceVersion' } as const;
+const WRITE_SPEC = { op: 'add', path: '/spec' } as const;
+
+export const leaseStore = (namespace: string, name: string): LeaseStore => ({
+  read: async () => recordOf(await K8s(Lease).InNamespace(namespace).Get(name)),
+  write: async (spec, version) => {
+    try {
+      return recordOf(
+        await K8s(Lease, { namespace, name }).Patch([
+          { ...UNCHANGED_SINCE, value: version },
+          { ...WRITE_SPEC, value: leaseSpec(spec) },
+        ]),
+      );
+    } catch (error) {
+      const status = (error as { status?: number }).status;
+      if (status === StatusCodes.CONFLICT || status === StatusCodes.UNPROCESSABLE_ENTITY) return undefined;
+      throw error;
+    }
+  },
+  watch: async (onRecord) => {
+    const watcher = K8s(Lease, { namespace, name }).Watch(async (lease, phase) => {
+      if (phase !== WatchPhase.Deleted) onRecord(recordOf(lease));
+    });
+    await watcher.start();
+    return { close: () => watcher.close() };
+  },
 });
 
 export const listRoutes = async (): Promise<HTTPRouteResource[]> =>
@@ -114,7 +188,7 @@ const watching = <T extends GenericClass>(model: T, onChange: () => Promise<void
   const seen = new Map<string, string>();
   return K8s(model).Watch(async (object, phase) => {
     const uid = object.metadata?.uid ?? `${object.metadata?.namespace}/${object.metadata?.name}`;
-    if ((phase as string) === 'DELETED') {
+    if (phase === WatchPhase.Deleted) {
       seen.delete(uid);
       return onChange();
     }
@@ -135,6 +209,39 @@ export const watchInputs = async (
   onChange: () => Promise<void>,
   cfg: WatchCfg = {},
 ): Promise<{ close: () => void }> => watchAll([HTTPRoute, AuthzDocument, Gateway, AuthzResourceName], onChange, cfg);
+
+const SERVICE_NAME = 'kubernetes.io/service-name';
+
+/** The pods a slice sends traffic to, which a rollout replaces: each by its uid, or its addresses when it has none. */
+const served = (slice: InstanceType<typeof kind.EndpointSlice>): Set<string | string[]> =>
+  new Set(
+    (slice.endpoints ?? [])
+      .filter((e) => e.conditions?.ready !== false)
+      .map((e): string | string[] => e.targetRef?.uid ?? e.addresses),
+  );
+
+/**
+ * Calls back when the pods behind a Service the caller reads change, which
+ * is when what that Service serves can change without any route moving.
+ */
+export const watchBackends = async (
+  reads: (service: ObjectRef) => boolean,
+  onChange: () => Promise<void>,
+): Promise<{ close: () => void }> => {
+  const seen = new Map<string | undefined, Set<string | string[]>>();
+  const watcher = K8s(kind.EndpointSlice).Watch(async (slice, phase) => {
+    const name = slice.metadata?.labels?.[SERVICE_NAME];
+    if (name === undefined || !reads({ namespace: slice.metadata?.namespace ?? '', name })) return;
+    const uid = slice.metadata?.uid;
+    const now = phase === WatchPhase.Deleted ? new Set<string | string[]>() : served(slice);
+    if (isDeepStrictEqual(seen.get(uid), now)) return;
+    const first = !seen.has(uid);
+    seen.set(uid, now);
+    if (!first) await onChange();
+  });
+  await watcher.start();
+  return { close: () => watcher.close() };
+};
 
 /** Calls back whenever a role or a separation rule appears, changes or leaves. */
 export const watchRoles = async (
@@ -162,6 +269,9 @@ export const setStatus = async (
   await K8s(model, { namespace, name }).PatchStatus({ metadata: { name, namespace }, status } as never);
 };
 
+const REFUSED_REASON = 'AuthorizationRefused';
+const EventType = { warning: 'Warning' } as const;
+
 /**
  * Reports a problem on the route it concerns. One Event per distinct message,
  * named by its digest, so every pass re-applies the same object instead of
@@ -173,16 +283,31 @@ export const reportOnRoute = async (namespace: string, route: string, message: s
   await K8s(kind.CoreEvent).Apply(
     {
       metadata: { name: `${route}.authz.${digest}`, namespace },
-      involvedObject: { apiVersion: 'gateway.networking.k8s.io/v1', kind: 'HTTPRoute', name: route, namespace },
-      reason: 'AuthorizationRefused',
+      involvedObject: { apiVersion: `${GATEWAY_API.group}/${GATEWAY_API.version}`, kind: ROUTE_KIND, name: route, namespace },
+      reason: REFUSED_REASON,
       message,
-      type: 'Warning',
-      source: { component: 'ml-iam-services' },
+      type: EventType.warning,
+      source: { component: COMPONENT },
       firstTimestamp: now as unknown as Date,
       lastTimestamp: now as unknown as Date,
     },
     { force: true },
   );
+};
+
+/** A ConfigMap's data, or nothing when there is no such ConfigMap. */
+export const readConfigMap = async (namespace: string, name: string): Promise<Record<string, string> | undefined> => {
+  try {
+    return (await K8s(kind.ConfigMap).InNamespace(namespace).Get(name)).data ?? {};
+  } catch (error) {
+    if ((error as { status?: number }).status === StatusCodes.NOT_FOUND) return undefined;
+    throw error;
+  }
+};
+
+/** Writes a role's spec, as the object the IAM keeps for it. */
+export const applyRole = async (role: AuthzRole): Promise<void> => {
+  await K8s(AuthzRole).Apply(role, { force: true });
 };
 
 /**
@@ -199,7 +324,7 @@ export const publish = async (
       metadata: {
         name,
         namespace,
-        labels: { 'app.kubernetes.io/managed-by': 'ml-iam-services' },
+        labels: MANAGED_BY,
       },
       data,
     },

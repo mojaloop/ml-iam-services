@@ -16,18 +16,18 @@
               "password": {
                 "identifier": true
               }
-            }
+            },
+            "recovery": { "via": "email" },
+            "verification": { "via": "email" }
           }
         },
-        "roles": {
-          "type": "array",
-          "items": {
-            "type": "string"
-          },
-          "title": "Roles"
+        "name": {
+          "type": "string",
+          "title": "Name"
         }
       },
-      "required": ["email"]
+      "required": ["email"],
+      "additionalProperties": false
     }
   }
 }

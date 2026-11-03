@@ -1,7 +1,7 @@
 import { CatalogPermission, ServiceCatalog } from '../../src/authzgen/types';
 import { materialize, materializeRole, roleObject } from '../../src/iam/materialize';
 import { provision } from '../../src/iam/provision';
-import { indexCatalogs, openResourceNames, readyRoles, RolesFile, validateRoles } from '../../src/iam/roles';
+import { indexCatalogs, openResourceNames, readyRoles, RoleDocument, RolesFile, validateRoles } from '../../src/iam/roles';
 
 const NAMES: Record<string, string> = { widgets: 'Widget', reports: 'Report' };
 
@@ -92,7 +92,7 @@ describe('role validation', () => {
         roles: {
           auditor: {
             grants: [
-              { permission: 'example.getWidgets', resources: { Widget: 'all' } },
+              { permission: 'example.getWidgets', resources: { Widget: '$all' } },
               { permission: 'example.getWidgetCa' },
             ],
           },
@@ -103,7 +103,7 @@ describe('role validation', () => {
 
   it('rejects a resource name the permission is not scoped by', () => {
     expect(
-      check({ roles: { r: { grants: [{ permission: 'example.getRegions', resources: { Widget: 'all' } }] } } }),
+      check({ roles: { r: { grants: [{ permission: 'example.getRegions', resources: { Widget: '$all' } }] } } }),
     ).toEqual(['r: example.getRegions names Widget, which does not scope it']);
   });
 
@@ -122,7 +122,7 @@ describe('role validation', () => {
   it('derives what a role leaves open, for its assignments to fill', () => {
     const role = {
       grants: [
-        { permission: 'example.getReportRows', resources: { Report: 'all' } },
+        { permission: 'example.getReportRows', resources: { Report: '$all' } },
         { permission: 'example.getRegions' },
       ],
     };
@@ -144,7 +144,7 @@ describe('role validation', () => {
       check({
         roles: {
           r: {
-            grants: [{ permission: 'example.gone' }, { permission: 'example.getRegions', resources: { Widget: 'all' } }],
+            grants: [{ permission: 'example.gone' }, { permission: 'example.getRegions', resources: { Widget: '$all' } }],
           },
         },
       }),
@@ -161,12 +161,12 @@ describe('materialization', () => {
   it('writes the singleton for a permission whose path binds nothing', () => {
     const tuples = materializeRole(
       'auditor',
-      { grants: [{ permission: 'example.getWidgets', resources: { Widget: 'all' } }] },
+      { grants: [{ permission: 'example.getWidgets', resources: { Widget: '$all' } }] },
       index,
     );
     expect(tuples[0]).toEqual({
       namespace: 'example',
-      object: '__self__',
+      object: '$self',
       relation: 'getWidgets',
       subject_set: { namespace: 'Role', object: 'auditor', relation: 'members' },
     });
@@ -175,10 +175,10 @@ describe('materialization', () => {
   it('writes the resource-name-wide object for an all setting', () => {
     const tuples = materializeRole(
       'admin',
-      { grants: [{ permission: 'example.getWidgetCa', resources: { Widget: 'all' } }] },
+      { grants: [{ permission: 'example.getWidgetCa', resources: { Widget: '$all' } }] },
       index,
     );
-    expect(tuples[0]!.object).toBe('Widget/__all__');
+    expect(tuples[0]!.object).toBe('Widget/$all');
   });
 
   it('writes one tuple per id in a list setting', () => {
@@ -196,7 +196,7 @@ describe('materialization', () => {
       { grants: [{ permission: 'example.getWidgets', resources: { Widget: ['w7', 'w11'] } }] },
       index,
     );
-    expect(tuples.map((t) => t.object)).toEqual(['__self__', 'Widget/w7', 'Widget/w11']);
+    expect(tuples.map((t) => t.object)).toEqual(['$self', 'Widget/w7', 'Widget/w11']);
     expect(tuples.every((t) => t.relation === 'getWidgets')).toBe(true);
   });
 
@@ -252,7 +252,7 @@ describe('materialization', () => {
       roles: {
         admin: {
           grants: [
-            { permission: 'example.getWidgetCa', resources: { Widget: 'all' } },
+            { permission: 'example.getWidgetCa', resources: { Widget: '$all' } },
             { permission: 'example.getRegions' },
           ],
         },
@@ -262,6 +262,54 @@ describe('materialization', () => {
     };
     const grants = materialize(file, index).filter((t) => t.namespace !== 'Role');
     expect(grants.every((t) => t.subject_id === undefined && t.subject_set !== undefined)).toBe(true);
+  });
+});
+
+describe('what a role may say', () => {
+  it('gives each permission once, with one reach', () => {
+    const twice: RoleDocument = {
+      grants: [
+        { permission: 'example.getReportRows', resources: { Report: '$all' } },
+        { permission: 'example.getReportRows', resources: { Widget: '$all' } },
+      ],
+    };
+    expect(check({ roles: { reader: twice } })).toEqual([
+      'reader: grants example.getReportRows more than once; a role gives each permission once, with one reach',
+    ]);
+  });
+
+  it('fixes a resource name to every resource or leaves it to the assignment, never to some', () => {
+    const some: RoleDocument = { grants: [{ permission: 'example.getWidgetCa', resources: { Widget: ['w1', 'w2'] } }] };
+    expect(check({ roles: { r: some } })).toEqual([
+      'r: example.getWidgetCa names Widget w1,w2; a role fixes Widget to $all or leaves it to the assignment',
+    ]);
+  });
+
+  it('names ids of the resource names whose ids are deployment data themselves', () => {
+    const some: RoleDocument = { grants: [{ permission: 'example.getWidgetCa', resources: { Widget: ['w1'] } }] };
+    expect(validateRoles({ roles: { r: some } }, index, new Set(['Widget']))).toEqual([]);
+  });
+});
+
+describe('a resource name an operation is scoped by through $resources', () => {
+  const administers: CatalogPermission = {
+    ...permission('example.administer', ['widgets', 'Report'], []),
+    resourceNames: { widgets: 'Widget', Report: 'Report' },
+    followsAssignment: ['Report'],
+  };
+  const followed = new Map(index).set(administers.id, administers);
+  const pairs = (tuples: ReturnType<typeof materializeRole>) => tuples.map((t) => t.object);
+
+  it('leaves no role open on it', () => {
+    expect(openResourceNames({ grants: [{ permission: administers.id }] }, followed)).toEqual(['Widget']);
+  });
+
+  it('reaches what the assignment names of it, what the grant fixes, or nothing', () => {
+    const role: RoleDocument = { grants: [{ permission: administers.id }] };
+    expect(pairs(materializeRole('admin', role, followed, { Widget: 'w1' }))).toEqual(['$self', 'Widget/w1']);
+    expect(pairs(materializeRole('admin', role, followed, { Widget: 'w1', Report: 'r1' }))).toEqual(['$self', 'Widget/w1', 'Report/r1']);
+    const fixed: RoleDocument = { grants: [{ permission: administers.id, resources: { Report: '$all' } }] };
+    expect(pairs(materializeRole('admin', fixed, followed, { Widget: 'w1' }))).toEqual(['$self', 'Widget/w1', 'Report/$all']);
   });
 });
 

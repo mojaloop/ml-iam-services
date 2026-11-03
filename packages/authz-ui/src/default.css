@@ -1,0 +1,213 @@
+.authz-role-list,
+.authz-role-editor,
+.authz-assignment-editor,
+.authz-resource-picker,
+.authz-subject-list {
+  font-family: var(--iam-font, inherit);
+  color: var(--iam-text, #1f2328);
+  display: flex;
+  flex-direction: column;
+  gap: var(--iam-gap, 0.75rem);
+}
+
+.authz-role-list__roles,
+.authz-assignment-editor__list,
+.authz-role-editor__grant-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--iam-gap, 0.75rem);
+}
+
+.authz-role,
+.authz-held,
+.authz-grant {
+  background: var(--iam-surface, #ffffff);
+  border: 1px solid var(--iam-border, #d1d9e0);
+  border-radius: var(--iam-radius, 6px);
+  padding: var(--iam-gap, 0.75rem);
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: calc(var(--iam-gap, 0.75rem) / 2);
+}
+
+.authz-role {
+  flex-direction: column;
+  align-items: stretch;
+}
+
+.authz-role--selected,
+.authz-subject--selected {
+  border-color: var(--iam-accent, #0969da);
+}
+
+.authz-role__head,
+.authz-role__status,
+.authz-role__actions,
+.authz-grant__head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: calc(var(--iam-gap, 0.75rem) / 2);
+}
+
+.authz-role__title,
+.authz-subject__open {
+  font-weight: 600;
+  background: none;
+  border: none;
+  padding: 0;
+  color: inherit;
+  font: inherit;
+  cursor: pointer;
+  text-align: left;
+}
+
+.authz-role__name,
+.authz-grant__id,
+.authz-grant__service,
+.authz-role__owner,
+.authz-held__through,
+.authz-field__hint,
+.authz-subject__kind,
+.authz-pager__status {
+  color: var(--iam-muted, #59636e);
+  font-size: 0.875em;
+}
+
+.authz-role__description {
+  margin: 0;
+}
+
+.authz-verdict {
+  display: inline-flex;
+  gap: 0.25rem;
+  font-size: 0.875em;
+}
+
+.authz-verdict--accepted .authz-verdict__reason {
+  color: var(--iam-accepted, #1a7f37);
+}
+
+.authz-verdict--refused .authz-verdict__reason {
+  color: var(--iam-refused, #cf222e);
+}
+
+.authz-verdict--waiting .authz-verdict__reason,
+.authz-verdict--unread .authz-verdict__reason {
+  color: var(--iam-waiting, #9a6700);
+}
+
+.authz-held__role {
+  font-weight: 600;
+}
+
+.authz-held__resource {
+  display: inline-flex;
+  gap: 0.25rem;
+}
+
+.authz-held__resource-name::after {
+  content: ':';
+}
+
+.authz-field,
+.authz-scope,
+.authz-role-editor__add,
+.authz-assignment-editor__assign,
+.authz-role-editor__actions,
+.authz-pager,
+.authz-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: calc(var(--iam-gap, 0.75rem) / 2);
+}
+
+.authz-scope {
+  border: none;
+  margin: 0;
+  padding: 0;
+  width: 100%;
+}
+
+.authz-field__label,
+.authz-scope__name,
+.authz-resource-picker__label {
+  font-weight: 600;
+}
+
+.authz-input,
+.authz-select {
+  font: inherit;
+  padding: 0.25rem 0.5rem;
+  border: 1px solid var(--iam-border, #d1d9e0);
+  border-radius: var(--iam-radius, 6px);
+  background: var(--iam-surface, #ffffff);
+  color: inherit;
+}
+
+.authz-button {
+  font: inherit;
+  padding: 0.25rem 0.75rem;
+  border: 1px solid var(--iam-border, #d1d9e0);
+  border-radius: var(--iam-radius, 6px);
+  background: var(--iam-surface, #ffffff);
+  color: inherit;
+  cursor: pointer;
+}
+
+.authz-button:disabled {
+  cursor: not-allowed;
+  opacity: 0.6;
+}
+
+.authz-button--primary {
+  background: var(--iam-accent, #0969da);
+  border-color: var(--iam-accent, #0969da);
+  color: var(--iam-accent-text, #ffffff);
+}
+
+.authz-button--danger {
+  color: var(--iam-danger, #cf222e);
+  border-color: var(--iam-danger, #cf222e);
+}
+
+.authz-failure,
+.authz-role-editor__problems,
+.authz-grant__unknown,
+.authz-grant__deprecated {
+  color: var(--iam-danger, #cf222e);
+}
+
+.authz-failure__reasons,
+.authz-role-editor__problems {
+  margin: 0;
+  padding-left: 1.25rem;
+}
+
+.authz-loading,
+.authz-empty {
+  color: var(--iam-muted, #59636e);
+  margin: 0;
+}
+
+.authz-subject-list__table {
+  border-collapse: collapse;
+  width: 100%;
+  background: var(--iam-surface, #ffffff);
+}
+
+.authz-subject-list__heading,
+.authz-subject td {
+  text-align: left;
+  padding: calc(var(--iam-gap, 0.75rem) / 2) var(--iam-gap, 0.75rem);
+  border-bottom: 1px solid var(--iam-border, #d1d9e0);
+}
+
+.authz-subject--selected td {
+  background: color-mix(in srgb, var(--iam-accent, #0969da) 8%, transparent);
+}

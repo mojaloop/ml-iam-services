@@ -1,0 +1,4 @@
+src/generated/
+*.tgz
+test-results/
+playwright-report/

@@ -13,6 +13,16 @@
  *   x-authz:
  *     internal: true                    # answered inside the cluster only
  *
+ *   x-authz:
+ *     replaces: [getOrder]              # the operationIds this one takes over
+ *
+ *   x-authz:
+ *     scopedBy: [roles, $resources]     # and by every resource name the deployment declares
+ *
+ * A grant naming an operation that disappeared keeps holding under the one
+ * that replaces it. An operation keeping its method and path is recognised
+ * without saying so; `replaces` is for one whose path moved too.
+ *
  * An internal operation is no permission and the gateway has no rule for it,
  * so it is unreachable from outside: health and metrics endpoints a kubelet or
  * a scraper calls on the pod itself.
@@ -21,6 +31,12 @@
  * Every scoping type, bound or not, reaches the service as what the caller
  * holds of it, which is what the service narrows its own rows by.
  *
+ * `$resources` is for an operation whose authority spans every kind of
+ * resource, such as handing out a role. The deployment's resource names are
+ * not the document's to know, so each one it declares, besides those the
+ * operation's own types already name, joins the scope under its own name
+ * when the deployment composes.
+ *
  * A document names no service and no permission. The route carries the
  * authorization namespace, and a permission is `<that>.<operationId>`, so one
  * image serving two routes answers under each route's own namespace.
@@ -28,6 +44,8 @@
 
 import fs from 'node:fs';
 import { parse as parseYaml } from 'yaml';
+
+import { RESERVED, RESOURCES } from '~/reserved';
 
 /** Where a request names an id of one resource type. */
 export interface Scoping {
@@ -48,8 +66,12 @@ export interface DeclaredOperation {
   list: boolean;
   /** The resource types the answer is scoped by, and where the path carries an id. */
   scopedBy: Scoping[];
+  /** Scoped by every resource name the deployment declares, too. */
+  resources: boolean;
   /** Answered inside the cluster only; never a permission. */
   internal: boolean;
+  /** The operationIds of this document that this operation takes over. */
+  replaces: string[];
 }
 
 export interface ReadDocument {
@@ -63,6 +85,7 @@ type ScopedByEntry = string | Record<string, string>;
 interface AuthzBlock {
   scopedBy?: ScopedByEntry[];
   internal?: boolean;
+  replaces?: string[];
 }
 
 interface MediaType {
@@ -88,7 +111,9 @@ interface DocumentNode {
   paths?: Record<string, PathItemNode | undefined>;
 }
 
-export const METHODS = ['get', 'put', 'post', 'delete', 'patch', 'head', 'options', 'trace', 'query'];
+export const METHODS: string[] = ['get', 'put', 'post', 'delete', 'patch', 'head', 'options', 'trace', 'query'];
+
+export { RESOURCES } from '~/reserved';
 
 /** A document that cannot be read as an authorization surface. */
 export class DocumentError extends Error {}
@@ -164,9 +189,17 @@ const readAuthz = (node: OperationNode, where: string): AuthzBlock => {
     throw new DocumentError(`${where}: x-authz must be an object`);
   }
   const block = authz as AuthzBlock;
-  const known = new Set(['scopedBy', 'internal']);
+  const known = new Set(['scopedBy', 'internal', 'replaces']);
   for (const key of Object.keys(block)) {
     if (!known.has(key)) throw new DocumentError(`${where}: unknown x-authz key "${key}"`);
+  }
+  if (block.replaces !== undefined) {
+    if (!Array.isArray(block.replaces) || block.replaces.some((id) => typeof id !== 'string' || id === '')) {
+      throw new DocumentError(`${where}: x-authz.replaces must be a list of operationIds`);
+    }
+    if (block.internal === true) {
+      throw new DocumentError(`${where}: an internal operation is no permission, so it replaces none`);
+    }
   }
   if (block.internal !== undefined && typeof block.internal !== 'boolean') {
     throw new DocumentError(`${where}: x-authz.internal must be true or false`);
@@ -185,6 +218,10 @@ const readAuthz = (node: OperationNode, where: string): AuthzBlock => {
         throw new DocumentError(
           `${where}: a scopedBy entry is a type, or one \`type: parameter\` binding, got ${JSON.stringify(entry)}`,
         );
+      }
+      const type = typeof entry === 'string' ? entry : Object.keys(entry)[0]!;
+      if (type.startsWith(RESERVED) && entry !== RESOURCES) {
+        throw new DocumentError(`${where}: scopedBy names ${type}; a type never starts with ${RESERVED}, and ${RESOURCES} stands alone`);
       }
     }
     const types = block.scopedBy.map((entry) => (typeof entry === 'string' ? entry : Object.keys(entry)[0]));
@@ -207,7 +244,7 @@ const scopedByOf = (
   where: string,
 ): Scoping[] => {
   const params = pathParams(template);
-  return entries.map((entry) => {
+  return entries.filter((entry) => entry !== RESOURCES).map((entry) => {
     if (typeof entry === 'string') {
       const param = bound.get(entry);
       if (param !== undefined) {
@@ -278,10 +315,29 @@ export const readDocument = (doc: unknown): ReadDocument => {
         list,
         /** Each entry carries the path parameter holding an id, when the path binds one. */
         scopedBy: declared,
+        resources: authz.scopedBy?.includes(RESOURCES) === true,
         internal,
+        replaces: authz.replaces ?? [],
       });
     }
   }
+
+  const ids = new Set(operations.map((o) => o.operationId));
+  for (const operation of operations) {
+    for (const old of operation.replaces) {
+      if (old === operation.operationId) {
+        throw new DocumentError(`${operation.method} ${operation.template}: x-authz.replaces names the operation itself`);
+      }
+      if (ids.has(old)) {
+        throw new DocumentError(
+          `${operation.method} ${operation.template}: x-authz.replaces ${old}, which the document still declares`,
+        );
+      }
+    }
+  }
+  const taken = operations.flatMap((o) => o.replaces);
+  const twice = taken.find((old, at) => taken.indexOf(old) !== at);
+  if (twice !== undefined) throw new DocumentError(`x-authz.replaces names ${twice} on two operations`);
 
   return { basePath: basePathOf(root), operations };
 };

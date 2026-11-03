@@ -1,0 +1,5 @@
+{
+  "type": "module",
+  "main": "../../dist/elements-define.js",
+  "types": "../../dist/elements-define.d.ts"
+}

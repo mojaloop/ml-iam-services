@@ -1,6 +1,9 @@
 import { DOCUMENT_PATH } from '@mojaloop/authz';
+import { StatusCodes } from 'http-status-codes';
 
+import { Header } from '../api/vocabulary';
 import { readSpec } from '../authzgen';
+import { describeObject, ObjectRef, refOf } from '../authzgen/problem';
 
 /**
  * Where a backend's document comes from: the backend itself, answering the
@@ -14,12 +17,9 @@ export interface AuthzDocumentResource {
   spec?: { document?: Record<string, unknown> };
 }
 
-export const documentId = (resource: AuthzDocumentResource): string =>
-  `${resource.metadata?.namespace ?? 'default'}/${resource.metadata?.name ?? '(unnamed)'}`;
-
 /** Reads the document an AuthzDocument carries. */
 export async function fromResource(resource: AuthzDocumentResource): Promise<unknown> {
-  const id = documentId(resource);
+  const id = describeObject(refOf(resource.metadata));
   const document = resource.spec?.document;
   if (document === undefined || typeof document !== 'object' || Array.isArray(document)) {
     throw new Error(`AuthzDocument/${id}: spec.document is not an OpenAPI document`);
@@ -43,22 +43,22 @@ export class ServedDocuments {
   private readonly seen = new Map<string, Fetched>();
 
   /** The URL a backend answers its document on, inside the cluster. */
-  static urlOf(namespace: string, name: string, port: number): string {
-    return `http://${name}.${namespace}.svc:${port}${DOCUMENT_PATH}`;
+  static urlOf(service: ObjectRef, port: number): string {
+    return `http://${service.name}.${service.namespace}.svc:${port}${DOCUMENT_PATH}`;
   }
 
   async read(url: string): Promise<unknown> {
     const known = this.seen.get(url);
     const response = await fetch(url, {
-      headers: known?.etag !== undefined ? { 'if-none-match': known.etag } : {},
+      headers: known?.etag !== undefined ? { [Header.ifNoneMatch]: known.etag } : {},
       signal: AbortSignal.timeout(TIMEOUT_MS),
     });
-    if (response.status === 304 && known !== undefined) return known.document;
+    if (response.status === StatusCodes.NOT_MODIFIED && known !== undefined) return known.document;
     if (!response.ok) throw new Error(`${url} answered ${response.status}`);
 
     const body = (await response.json()) as Record<string, unknown>;
     const document = await readSpec(body, url);
-    const etag = response.headers.get('etag') ?? undefined;
+    const etag = response.headers.get(Header.etag) ?? undefined;
     this.seen.set(url, { document, ...(etag !== undefined ? { etag } : {}) });
     return document;
   }

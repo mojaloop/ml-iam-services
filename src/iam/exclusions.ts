@@ -1,3 +1,4 @@
+import { serviceOf } from '../authzgen/permission';
 import { MEMBERS, parseInstance, ROLE_NAMESPACE } from './materialize';
 import { ALL, grantResources, PermissionIndex, RoleDocument, RolesFile } from './roles';
 
@@ -10,11 +11,15 @@ import { ALL, grantResources, PermissionIndex, RoleDocument, RolesFile } from '.
  * making the combination is the one who can undo it.
  */
 
+/** What a rule compares holdings within: everything a subject holds, or one resource. */
+export const Within = { subject: 'subject', resource: 'resource' } as const;
+export type Within = (typeof Within)[keyof typeof Within];
+
 export interface Exclusion {
   /** What the rule is called, so a refusal names the policy it enforces. */
   name: string;
   groups: string[][];
-  within?: 'subject' | 'resource';
+  within?: Within;
   /** For `within: resource`, the resource name holdings are compared on. */
   resourceName?: string;
 }
@@ -49,7 +54,7 @@ const overlap = (a: Set<string>, b: Set<string>): boolean =>
 
 /**
  * The rules a set of holdings breaks. `subject` is broken by touching two
- * groups at all; `resource` by holding two groups over one resource, `all`
+ * groups at all; `resource` by holding two groups over one resource, `$all`
  * overlapping every other.
  */
 export function broken(holdings: Holding[], exclusions: Exclusion[], index: PermissionIndex): string[] {
@@ -59,7 +64,7 @@ export function broken(holdings: Holding[], exclusions: Exclusion[], index: Perm
     const touched = rule.groups.map((group) => group.filter((id) => held.has(id))).filter((ids) => ids.length > 0);
     if (touched.length < 2) continue;
 
-    if (rule.within === 'resource' && rule.resourceName !== undefined) {
+    if (rule.within === Within.resource && rule.resourceName !== undefined) {
       const over = rule.groups.map((group) => {
         const ids = new Set(group);
         const all = new Set<string>();
@@ -116,18 +121,18 @@ export function ruleProblems(rule: Exclusion, index: PermissionIndex, composed?:
     problems.push(`${rule.name}: needs two groups, each with a permission`);
   }
   for (const id of rule.groups.flat()) {
-    if (composed !== undefined && !composed.has(id.split('.')[0]!)) continue;
+    if (composed !== undefined && !composed.has(serviceOf(id))) continue;
     const permission = index.get(id);
     if (permission === undefined) {
       problems.push(`${rule.name}: unknown permission ${id}`);
     } else if (
-      rule.within === 'resource' &&
+      rule.within === Within.resource &&
       !Object.values(permission.resourceNames).includes(rule.resourceName ?? '')
     ) {
       problems.push(`${rule.name}: ${id} is not scoped by ${rule.resourceName}`);
     }
   }
-  if (rule.within === 'resource' && rule.resourceName === undefined) {
+  if (rule.within === Within.resource && rule.resourceName === undefined) {
     problems.push(`${rule.name}: within resource names the resource name it compares on`);
   }
   return problems;

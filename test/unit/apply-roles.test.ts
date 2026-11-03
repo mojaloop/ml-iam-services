@@ -1,6 +1,6 @@
 import { CatalogPermission, ServiceCatalog } from '../../src/authzgen/types';
 import { describe as name } from '../../src/iam/keto';
-import { membership, Tuple } from '../../src/iam/materialize';
+import { heldByMarker, membership, Tuple } from '../../src/iam/materialize';
 import { Provisioner } from '../../src/iam/provisioner';
 import { applyRoles } from '../../src/iam/reconcile';
 import { indexCatalogs, RolesFile } from '../../src/iam/roles';
@@ -60,17 +60,17 @@ describe('applying the roles to Keto', () => {
     expect(keto.patches).toBe(1);
     expect(keys(keto.tuples)).toEqual(
       keys([
-        grant('__self__', 'read', 'reader'),
-        grant('__self__', 'write', 'writer'),
-        grant('__self__', 'audit', 'writer'),
+        grant('$self', 'read', 'reader'),
+        grant('$self', 'write', 'writer'),
+        grant('$self', 'audit', 'writer'),
       ]),
     );
   });
 
   it('leaves a grant the role still has untouched, and removes only the one it lost', async () => {
     const keto = new MemoryKeto(['Role', 'Resource', 'ledger']);
-    const kept = grant('__self__', 'read', 'reader');
-    keto.tuples = [kept, grant('__self__', 'write', 'reader')];
+    const kept = grant('$self', 'read', 'reader');
+    keto.tuples = [kept, grant('$self', 'write', 'reader')];
 
     const applied = await applyRoles(keto, rolesOf({ reader: { grants: [{ permission: 'ledger.read' }] } }), index);
 
@@ -80,11 +80,11 @@ describe('applying the roles to Keto', () => {
 
   it('takes every grant away from a role that is no longer live', async () => {
     const keto = new MemoryKeto(['Role', 'Resource', 'ledger']);
-    keto.tuples = [grant('__self__', 'write', 'retired'), grant('__self__', 'read', 'reader')];
+    keto.tuples = [grant('$self', 'write', 'retired'), grant('$self', 'read', 'reader')];
 
     await applyRoles(keto, rolesOf({ reader: { grants: [{ permission: 'ledger.read' }] } }), index);
 
-    expect(keys(keto.tuples)).toEqual(keys([grant('__self__', 'read', 'reader')]));
+    expect(keys(keto.tuples)).toEqual(keys([grant('$self', 'read', 'reader')]));
   });
 
   it('applied twice, holds one row per grant and per membership', async () => {
@@ -118,19 +118,58 @@ describe('applying the roles to Keto', () => {
 
   it('leaves grants in a namespace the model no longer declares alone', async () => {
     const keto = new MemoryKeto(['Role', 'Resource', 'ledger']);
-    const retired: Tuple = { ...grant('__self__', 'view', 'reader'), namespace: 'gone' };
+    const retired: Tuple = { ...grant('$self', 'view', 'reader'), namespace: 'gone' };
     keto.tuples = [retired];
 
     await applyRoles(keto, rolesOf({ reader: { grants: [{ permission: 'ledger.read' }] } }), index);
 
     expect(keto.tuples).toContainEqual(retired);
   });
+
+  it('marks a role every subject holds in the same patch as its grants, and unmarks one that stops being', async () => {
+    const keto = new MemoryKeto(['Role', 'Resource', 'ledger']);
+    keto.tuples = [heldByMarker('former')];
+
+    await applyRoles(
+      keto,
+      rolesOf({
+        'signed-in': { heldBy: 'authenticated', grants: [{ permission: 'ledger.read' }] },
+        former: { grants: [{ permission: 'ledger.write' }] },
+      }),
+      index,
+    );
+
+    expect(keto.patches).toBe(1);
+    expect(keys(keto.tuples)).toEqual(
+      keys([heldByMarker('signed-in'), grant('$self', 'read', 'signed-in'), grant('$self', 'write', 'former')]),
+    );
+  });
+
+  it('names the members of every role whose grants it changed, and nobody when nothing changed', async () => {
+    const keto = new MemoryKeto(['Role', 'Resource', 'ledger']);
+    keto.tuples = [membership('reader', 'alice'), membership('writer', 'bob')];
+    const roles = (readerGrant: string) =>
+      rolesOf({ reader: { grants: [{ permission: readerGrant }] }, writer: { grants: [{ permission: 'ledger.write' }] } });
+
+    expect((await applyRoles(keto, roles('ledger.read'), index)).affected).toEqual({ everyone: false, subjects: ['alice', 'bob'] });
+    expect((await applyRoles(keto, roles('ledger.audit'), index)).affected).toEqual({ everyone: false, subjects: ['alice'] });
+    expect((await applyRoles(keto, roles('ledger.audit'), index)).affected).toEqual({ everyone: false, subjects: [] });
+  });
+
+  it('names everyone when a role every signed-in subject holds is marked or its grants change', async () => {
+    const keto = new MemoryKeto(['Role', 'Resource', 'ledger']);
+    const signedIn = (permission: string) => rolesOf({ 'signed-in': { heldBy: 'authenticated', grants: [{ permission }] } });
+
+    expect((await applyRoles(keto, signedIn('ledger.read'), index)).affected.everyone).toBe(true);
+    expect((await applyRoles(keto, signedIn('ledger.read'), index)).affected.everyone).toBe(false);
+    expect((await applyRoles(keto, signedIn('ledger.write'), index)).affected.everyone).toBe(true);
+  });
 });
 
 describe('one patch', () => {
   it('refuses to insert and delete the same tuple, which would leave it with no row', async () => {
     const keto = new MemoryKeto(['Role', 'ledger']);
-    const tuple = grant('__self__', 'read', 'reader');
+    const tuple = grant('$self', 'read', 'reader');
     keto.tuples = [tuple];
 
     await expect(keto.patch([tuple], [tuple])).rejects.toThrow(/inserts and deletes/);
@@ -144,7 +183,7 @@ describe('assigning through the IAM', () => {
 
   it('writes the instance and the membership in one patch, and a repeat adds nothing', async () => {
     const keto = new MemoryKeto(['Role', 'Resource', 'ledger']);
-    keto.tuples = [{ namespace: 'Resource', object: 'participant/dfsp1', relation: 'exists', subject_id: '__registry__' }];
+    keto.tuples = [{ namespace: 'Resource', object: 'participant/dfsp1', relation: 'exists', subject_id: '$registry' }];
     const provisioner = new Provisioner(keto, roles, index, {
       resourceNames: { participant: { members: [{ service: 'ledger', type: 'participants' }] } },
     });
@@ -171,5 +210,22 @@ describe('assigning through the IAM', () => {
     expect(keto.patches - before).toBe(1);
     expect(keto.tuples).toEqual([]);
     expect(result.orphaned).toEqual(['alice']);
+  });
+
+  it('names as orphaned only the members holding nothing over any other resource', async () => {
+    const keto = new MemoryKeto(['Role', 'Resource', 'ledger']);
+    const provisioner = new Provisioner(keto, roles, index, {
+      resourceNames: { participant: { members: [{ service: 'ledger', type: 'participants' }] } },
+    });
+    await provisioner.provision({ resourceName: 'participant', id: 'dfsp1' });
+    await provisioner.provision({ resourceName: 'participant', id: 'dfsp2' });
+    await provisioner.assign('alice', { role: 'operator', resources: { participant: 'dfsp1' } });
+    await provisioner.assign('bob', { role: 'operator', resources: { participant: 'dfsp1' } });
+    await provisioner.assign('bob', { role: 'operator', resources: { participant: 'dfsp2' } });
+
+    const result = await provisioner.deprovision({ resourceName: 'participant', id: 'dfsp1' });
+
+    expect(result.orphaned).toEqual(['alice']);
+    expect(await provisioner.assignments('bob')).toEqual([{ role: 'operator', resources: { participant: 'dfsp2' } }]);
   });
 });

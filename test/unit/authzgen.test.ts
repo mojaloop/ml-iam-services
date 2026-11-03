@@ -1,8 +1,12 @@
+import { isDeepStrictEqual } from 'node:util';
+
 import { DocumentError } from '@mojaloop/authz/document';
 
+import { generate } from '../../src/authzgen';
 import { derive } from '../../src/authzgen/derive';
 import { emitModel } from '../../src/authzgen/emit-model';
 import { emitRules } from '../../src/authzgen/emit-rules';
+import { ServiceCatalog } from '../../src/authzgen/types';
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
 
@@ -410,8 +414,8 @@ describe('authzgen rule emission', () => {
   });
 
   it('addresses the singleton when the path binds no declared type', () => {
-    expect(byId('example.createWidget').authorizer.config.payload).toContain('"object":"__self__"');
-    expect(byId('example.getWidgets').authorizer.config.payload).toContain('"object":"__self__"');
+    expect(byId('example.createWidget').authorizer.config.payload).toContain('"object":"$self"');
+    expect(byId('example.getWidgets').authorizer.config.payload).toContain('"object":"$self"');
   });
 
   it('checks every operation, so what is open is a grant rather than a rule', () => {
@@ -427,8 +431,21 @@ describe('authzgen rule emission', () => {
     expect(chosen.find((r) => r.id === 'example.getWidgets').authenticators).toEqual([{ handler: 'mtls' }]);
   });
 
-  it('carries a noop mutator on every rule', () => {
-    expect(rules.every((r) => r.mutators.every((m: any) => m.handler === 'noop'))).toBe(true);
+  it('tells a service nothing about its caller', () => {
+    const operations = rules.filter((r) => r.id !== 'example.preflight');
+    expect(operations.every((r) => isDeepStrictEqual(r.mutators, [{ handler: 'noop' }]))).toBe(true);
+  });
+
+  it('tells the IAM its caller on every operation, as the subject the gateway authenticated', () => {
+    const own = emitRules(named(derive(doc, SERVICE)), { caller: true }) as any[];
+    for (const r of own.filter((rule) => rule.id !== 'example.preflight')) {
+      expect(r.mutators).toEqual([{ handler: 'header', config: { headers: { 'x-user': '{{ print .Subject }}' } } }]);
+    }
+  });
+
+  it('states the scope on a preflight, which the decision never answers', () => {
+    expect(byId('example.preflight').authorizer).toEqual({ handler: 'allow' });
+    expect(byId('example.preflight').mutators).toEqual([{ handler: 'header', config: { headers: { 'x-scope': 'none' } } }]);
   });
 });
 
@@ -443,5 +460,47 @@ describe('authzgen model emission', () => {
     expect(model).toContain('export class Role implements Namespace {');
     expect(model).not.toContain('getWidgetParts');
     expect(model).not.toContain('permits');
+  });
+});
+
+describe('an operation scoped by every resource name the deployment declares', () => {
+  const doc = spec(
+    {
+      '/grants': { post: op('grant', { 'x-authz': { scopedBy: ['widgets', '$resources'] }, responses: { 200: { description: 'ok' } } }) },
+    },
+    ['widgets'],
+  );
+  const names = {
+    resourceNames: {
+      widget: { members: [{ service: SERVICE, type: 'widgets' }] },
+      region: { members: [{ service: 'atlas', type: 'regions' }] },
+      tenant: { members: [{ service: 'atlas', type: 'tenants' }] },
+    },
+  };
+
+  it('is scoped by each one its own types do not name, under its own name, following the assignment', () => {
+    const { catalog } = generate(doc, SERVICE, {}, names);
+    const granted = (JSON.parse(catalog) as ServiceCatalog).permissions[0]!;
+    expect(granted).toMatchObject({
+      scopedBy: ['widgets', 'region', 'tenant'],
+      resourceNames: { widgets: 'widget', region: 'region', tenant: 'tenant' },
+      followsAssignment: ['region', 'tenant'],
+    });
+  });
+
+  it('asks the decision for each one, marked so holding none of it reaches none', () => {
+    const { rules } = generate(doc, SERVICE, {}, names);
+    const rule = rules.find((r) => r.id === `${SERVICE}.grant`)!;
+    const payload = JSON.parse(rule.authorizer.config!.payload) as { scope: unknown[] };
+    expect(payload.scope).toEqual([
+      { type: 'widgets', resourceName: 'widget' },
+      { type: 'region', resourceName: 'region', followsAssignment: true },
+      { type: 'tenant', resourceName: 'tenant', followsAssignment: true },
+    ]);
+  });
+
+  it('refuses a resource name whose own name a type of the operation already spells for another', () => {
+    const clash = { resourceNames: { ...names.resourceNames, widgets: { members: [{ service: 'atlas', type: 'parts' }] } } };
+    expect(() => generate(doc, SERVICE, {}, clash)).toThrow(/its type widgets is resource name widget/);
   });
 });

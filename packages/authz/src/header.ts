@@ -9,11 +9,17 @@
  * writer would be a silent data leak in that service rather than a parse
  * error.
  *
- *   orders=*                        every resource of that type
+ *   orders=$all                     every resource of that type
  *   orders=o7,o11                   those resources
  *   customers=acme;orders=o1        several types at once
  *   none                            no type is in play, nothing is visible
+ *
+ * A word the platform reserves starts with `$`, which no id may, so `$all`
+ * can never be read as an id.
  */
+
+import { Separator } from '~/format';
+import { ALL } from '~/reserved';
 
 /** What one decision says about one resource type. */
 export interface ScopeEntry {
@@ -44,15 +50,15 @@ export const NONE = 'none';
 export const UNRESTRICTED: unique symbol = Symbol.for('@mojaloop/authz.INTERNAL');
 
 /**
- * Renders a visible set per type. An entry marked `all` collapses to `*`;
+ * Renders a visible set per type. An entry marked `all` collapses to `$all`;
  * everything else lists its ids.
  */
 export const formatScope = (scope: Scope): string => {
   const parts: string[] = [];
   for (const [type, visible] of scope) {
-    parts.push(`${type}=${visible.all ? '*' : visible.ids.join(',')}`);
+    parts.push(`${type}${Separator.type}${visible.all ? ALL : visible.ids.join(Separator.ids)}`);
   }
-  return parts.length === 0 ? NONE : parts.join(';');
+  return parts.length === 0 ? NONE : parts.join(Separator.types);
 };
 
 /**
@@ -80,14 +86,14 @@ const headerValue = (headers: RequestHeaders | undefined): string | null | undef
 export const parseScope = (headers?: RequestHeaders): Scope => {
   const raw = headerValue(headers);
   const scope: Scope = new Map();
-  for (const part of String(raw ?? '').split(';')) {
-    const eq = part.indexOf('=');
+  for (const part of String(raw ?? '').split(Separator.types)) {
+    const eq = part.indexOf(Separator.type);
     if (eq < 1) continue;
     const type = part.slice(0, eq).trim();
-    const list = part.slice(eq + 1);
+    const list = part.slice(eq + Separator.type.length);
     scope.set(type, {
-      all: list === '*',
-      ids: list === '*' || list === '' ? [] : list.split(','),
+      all: list === ALL,
+      ids: list === ALL || list === '' ? [] : list.split(Separator.ids),
     });
   }
   return scope;

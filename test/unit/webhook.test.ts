@@ -1,4 +1,5 @@
 import { CatalogPermission, ServiceCatalog } from '../../src/authzgen/types';
+import { EMPTY, History } from '../../src/iam/history';
 import { AdmissionContext, review } from '../../src/operator/webhook';
 
 const admission = (document: unknown) => ({
@@ -94,16 +95,71 @@ const reviewing = (kind: string, incoming: unknown, oldObject?: unknown) => ({
   request: { uid: 'u-2', operation: oldObject === undefined ? 'CREATE' : 'UPDATE', kind: { kind }, object: incoming, oldObject },
 });
 
-const context = (stored: Record<string, unknown[]> = {}, holders = 0): AdmissionContext => ({
+type Instances = Array<{ role: string; resources: Record<string, string> }>;
+
+const context = (
+  stored: Record<string, unknown[]> = {},
+  held: Record<string, Instances> = {},
+  history: History = EMPTY,
+): AdmissionContext => ({
   catalog,
+  own: () => new Set(['role']),
+  roleName: () => 'role',
   stored: async (kind) => (stored[kind] ?? []) as never,
-  holders: async () => holders,
+  held: async () => new Map(Object.entries(held)),
+  history: () => history,
+});
+
+describe('AuthzRole deletion', () => {
+  const removing = (gone: unknown) => ({ request: { uid: 'u-3', operation: 'DELETE', kind: { kind: 'AuthzRole' }, oldObject: gone } });
+  const reader = object('AuthzRole', 'reader', { grants: [{ permission: 'ledger.read' }] });
+  const handing = (named: unknown) =>
+    object('AuthzRole', 'reader-admin', { grants: [{ permission: 'ledger.read', resources: { role: named } }] });
+
+  it('refuses removing a role another role names by id, saying which', async () => {
+    const answer = await message(removing(reader), context({ AuthzRole: [reader, handing(['reader'])] }));
+    expect(answer).toMatchObject({
+      allowed: false,
+      status: { message: 'AuthzRole/mcm/reader: reader is named by the grants of reader-admin; take it out of them first' },
+    });
+  });
+
+  it('lets a role go that no grant names, or that only $all reaches', async () => {
+    expect((await message(removing(reader), context({ AuthzRole: [reader] }))).allowed).toBe(true);
+    expect((await message(removing(reader), context({ AuthzRole: [reader, handing('$all')] }))).allowed).toBe(true);
+  });
+
+  it('lets a role go that names only itself', async () => {
+    const self = object('AuthzRole', 'reader-admin', { grants: [{ permission: 'ledger.read', resources: { role: ['reader-admin'] } }] });
+    expect((await message(removing(self), context({ AuthzRole: [self] }))).allowed).toBe(true);
+  });
+
+  it('lets any other kind go unchecked', async () => {
+    const rule = { request: { uid: 'u-4', operation: 'DELETE', kind: { kind: 'AuthzSeparation' }, oldObject: object('AuthzSeparation', 'x', {}) } };
+    expect((await message(rule, context())).allowed).toBe(true);
+  });
 });
 
 const message = async (body: unknown, ctx: AdmissionContext) =>
-  (await review(body, ctx)).response as { allowed: boolean; status?: { message: string } };
+  (await review(body, ctx)).response as { allowed: boolean; status?: { message: string }; warnings?: string[] };
 
 describe('AuthzRole admission', () => {
+  it('admits a grant under a renamed permission, warning whoever applies it', async () => {
+    const role = object('AuthzRole', 'reader', { grants: [{ permission: 'ledger.fetch' }] });
+    const answer = await message(
+      reviewing('AuthzRole', role),
+      context({}, {}, { known: {}, renamed: { 'ledger.fetch': 'ledger.read' }, removed: [] }),
+    );
+    expect(answer).toMatchObject({
+      allowed: true,
+      warnings: ['reader: ledger.fetch is now ledger.read; the grant holds under the new name'],
+    });
+  });
+
+  it('still refuses a permission no catalog ever had', async () => {
+    const role = object('AuthzRole', 'reader', { grants: [{ permission: 'ledger.fetch' }] });
+    expect((await message(reviewing('AuthzRole', role), context())).allowed).toBe(false);
+  });
   it('admits a role over composed permissions', async () => {
     const role = object('AuthzRole', 'reader', { grants: [{ permission: 'ledger.read' }] });
     expect((await message(reviewing('AuthzRole', role), context())).allowed).toBe(true);
@@ -145,11 +201,9 @@ describe('AuthzRole admission', () => {
     expect(answer.status?.message).toContain('both: its grants span maker-checker');
   });
 
-  it('refuses a role every subject holds, which the decision does not answer for yet', async () => {
+  it('admits a role every subject holds over permissions that leave nothing open', async () => {
     const role = object('AuthzRole', 'signed-in', { heldBy: 'authenticated', grants: [{ permission: 'ledger.read' }] });
-    const answer = await message(reviewing('AuthzRole', role), context());
-    expect(answer.allowed).toBe(false);
-    expect(answer.status?.message).toContain('the decision does not yet answer for a role every signed-in subject holds');
+    expect((await message(reviewing('AuthzRole', role), context())).allowed).toBe(true);
   });
 
   it('refuses a role every subject holds that leaves a resource open', async () => {
@@ -167,8 +221,30 @@ describe('AuthzRole admission', () => {
   it('refuses making an assigned role every subject’s, saying how many hold it', async () => {
     const before = object('AuthzRole', 'reader', { grants: [{ permission: 'ledger.read' }] });
     const after = object('AuthzRole', 'reader', { heldBy: 'authenticated', grants: [{ permission: 'ledger.read' }] });
-    const answer = await message(reviewing('AuthzRole', after, before), context({}, 3));
+    const held = { a: [{ role: 'reader', resources: {} }], b: [{ role: 'reader', resources: {} }], c: [{ role: 'reader', resources: {} }] };
+    const answer = await message(reviewing('AuthzRole', after, before), context({}, held));
     expect(answer.status?.message).toContain('3 subjects are assigned it');
+  });
+
+  it('refuses an edit that would leave a holder breaking a rule, naming them', async () => {
+    const rule = object('AuthzSeparation', 'maker-checker', { groups: [['ledger.create'], ['ledger.approve']] });
+    const maker = object('AuthzRole', 'maker', { grants: [{ permission: 'ledger.create' }] });
+    const before = object('AuthzRole', 'reader', { grants: [{ permission: 'ledger.read' }] });
+    const after = object('AuthzRole', 'reader', { grants: [{ permission: 'ledger.read' }, { permission: 'ledger.approve' }] });
+    const held = {
+      alice: [
+        { role: 'maker', resources: { participant: 'p1' } },
+        { role: 'reader', resources: { participant: 'p1' } },
+      ],
+      bob: [{ role: 'reader', resources: { participant: 'p1' } }],
+    };
+    const answer = await message(
+      reviewing('AuthzRole', after, before),
+      context({ AuthzSeparation: [rule], AuthzRole: [maker, before] }, held),
+    );
+    expect(answer.allowed).toBe(false);
+    expect(answer.status?.message).toContain('the change would leave alice, who holds it, breaking maker-checker');
+    expect(answer.status?.message).not.toContain('bob');
   });
 
   it('refuses while the IAM has composed nothing to check against', async () => {

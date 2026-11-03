@@ -10,6 +10,8 @@ export interface ScopedType {
   param?: string;
   captureIndex?: number;
   resourceName?: string;
+  /** Joined through `$resources`: a grant naming none of it takes the assignment's, and leaves no name open. */
+  followsAssignment?: true;
 }
 
 export interface Permission {
@@ -23,6 +25,10 @@ export interface Permission {
   summary?: string;
   deprecated: boolean;
   scopedBy: ScopedType[];
+  /** Scoped by every resource name the deployment declares, too, once composed against them. */
+  resources: boolean;
+  /** The permissions of this service this one takes over, by id. */
+  replaces: string[];
 }
 
 export interface ServiceBundle {
@@ -53,6 +59,14 @@ export interface CatalogPermission {
   bound: string[];
   /** The deployment's resource name per scoped type, which is what grants speak in. */
   resourceNames: Record<string, string>;
+  /**
+   * The scoped types `$resources` brought in. A grant naming none of one
+   * reaches what its assignment names of it, or nothing, and leaves the role
+   * open on none of them.
+   */
+  followsAssignment?: string[];
+  /** The permissions of this service this one takes over, by id. */
+  replaces?: string[];
 }
 
 export interface ServiceCatalog {

@@ -1,4 +1,6 @@
-import { Tuple } from './materialize';
+import { ALL, REGISTRY } from '../authzgen/reserved';
+import { ResourceInstance, resourceObject } from '../authzgen/resource-object';
+import type { Tuple } from './materialize';
 
 /**
  * Which resources exist, keyed by the deployment's resource name.
@@ -10,20 +12,14 @@ import { Tuple } from './materialize';
  * already has.
  *
  * The row grants nothing: it sits in its own namespace, under a relation no
- * rule ever checks, held by a subject that is not a principal.
+ * rule ever checks, held by a subject that is not a principal. A resource name
+ * with a declared source is listed from it when asked, and keeps no row here.
  */
 
 export const RESOURCE_NAMESPACE = 'Resource';
 export const EXISTS = 'exists';
-export const REGISTRY = '__registry__';
-/**
- * The rows a declared source keeps. Its own marker is what lets it reconcile
- * without ever touching a row a service provisioned; every reader of the
- * registry accepts either marker.
- */
-export const SOURCED = '__source__';
-
-export const resourceObject = (resourceName: string, id: string): string => `${resourceName}/${id}`;
+export { REGISTRY } from '../authzgen/reserved';
+export { parseResource, type ResourceInstance, resourceObject } from '../authzgen/resource-object';
 
 export const registryTuple = (resourceName: string, id: string): Tuple => ({
   namespace: RESOURCE_NAMESPACE,
@@ -32,19 +28,6 @@ export const registryTuple = (resourceName: string, id: string): Tuple => ({
   subject_id: REGISTRY,
 });
 
-export const sourcedTuple = (resourceName: string, id: string): Tuple => ({
-  namespace: RESOURCE_NAMESPACE,
-  object: resourceObject(resourceName, id),
-  relation: EXISTS,
-  subject_id: SOURCED,
-});
-
-export interface ResourceInstance {
-  resourceName: string;
-  id: string;
-}
-
-export const parseResource = (object: string): ResourceInstance | undefined => {
-  const slash = object.indexOf('/');
-  return slash > 0 ? { resourceName: object.slice(0, slash), id: object.slice(slash + 1) } : undefined;
-};
+/** Whether a held object reaches this resource: it is the resource, or every one of its name. */
+export const reachesResource = (held: ResourceInstance | undefined, resourceName: string, id: string): boolean =>
+  held !== undefined && held.resourceName === resourceName && (held.id === id || held.id === ALL);

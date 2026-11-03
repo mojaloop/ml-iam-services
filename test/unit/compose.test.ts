@@ -1,6 +1,7 @@
 import { compose, ComposedService } from '../../src/authzgen/compose';
 import { derive } from '../../src/authzgen/derive';
 import { CANONICAL_STUBS } from '../../src/authzgen/emit-model';
+import { AccessRule, GatewayHandler } from '../../src/authzgen/emit-rules';
 import { ketoNamespace } from '../../src/authzgen/keto-name';
 import { CatalogPermission, ServiceBundle, ServiceCatalog } from '../../src/authzgen/types';
 import { indexCatalogs } from '../../src/iam/roles';
@@ -15,6 +16,7 @@ const permission = (id: string, scopedBy: string[] = [], bound: string[] = []): 
   path: '/x',
   scopedBy,
   bound,
+  resourceNames: {},
 });
 
 const catalog = (service: string, permissions: CatalogPermission[]): ServiceCatalog => ({
@@ -42,19 +44,28 @@ const bundle = (service: string, permissions: CatalogPermission[]): ServiceBundl
     scopedBy: p.scopedBy.map((type) =>
       p.bound.includes(type) ? { type, param: `${type}Id`, captureIndex: 1 } : { type },
     ),
+    resources: false,
+    replaces: [],
   })),
   internalPaths: [],
 });
 
-const service = (name: string, permissions: CatalogPermission[], rules = ''): ComposedService => ({
+const service = (name: string, permissions: CatalogPermission[], rules: AccessRule[] = []): ComposedService => ({
   bundle: bundle(name, permissions),
   rules,
   catalog: catalog(name, permissions),
   derivation: `# ${name}\n`,
 });
 
-const rulesFor = (id: string, url: string, method = 'GET') =>
-  `- id: ${id}\n  match:\n    url: ${url}\n    methods:\n      - ${method}\n`;
+const rulesFor = (id: string, url: string, method = 'GET'): AccessRule[] => [
+  {
+    id,
+    match: { url, methods: [method] },
+    authenticators: [{ handler: GatewayHandler.noop }],
+    authorizer: { handler: GatewayHandler.allow },
+    mutators: [{ handler: GatewayHandler.noop }],
+  },
+];
 
 describe('composing a deployment', () => {
   it('stages the shared classes once and one namespace per service, in a stable order', () => {
@@ -69,7 +80,7 @@ describe('composing a deployment', () => {
       service('alpha', [permission('shared.get')]),
       service('beta', [permission('shared.get')]),
     ]);
-    expect(problems).toEqual(['permission shared.get is claimed by alpha and beta']);
+    expect(problems).toEqual([{ message: 'permission shared.get is claimed by alpha and beta', services: ['alpha', 'beta'] }]);
   });
 
   it('refuses two services claiming one request', () => {
@@ -78,7 +89,16 @@ describe('composing a deployment', () => {
       service('alpha', [permission('alpha.get')], rulesFor('alpha.get', url)),
       service('beta', [permission('beta.get')], rulesFor('beta.get', url)),
     ]);
-    expect(problems).toEqual([`beta and alpha both match GET ${url}`]);
+    expect(problems).toEqual([{ message: `beta and alpha both match GET ${url}`, services: ['beta', 'alpha'] }]);
+  });
+
+  it('lets two services answer one URL for different methods', () => {
+    const url = '<http|https>://portal.test/api/x<$>';
+    const { problems } = compose([
+      service('alpha', [permission('alpha.get')], rulesFor('alpha.get', url)),
+      service('beta', [permission('beta.put')], rulesFor('beta.put', url, 'PUT')),
+    ]);
+    expect(problems).toEqual([]);
   });
 
   it('lets two services serve the same path on different hosts', () => {
@@ -91,7 +111,7 @@ describe('composing a deployment', () => {
 
   it('refuses one service registered twice', () => {
     const { problems } = compose([service('alpha', [permission('alpha.get')]), service('alpha', [permission('alpha.list')])]);
-    expect(problems).toEqual(['service alpha is registered 2 times']);
+    expect(problems).toEqual([{ message: 'service alpha is registered 2 times', services: ['alpha'] }]);
   });
 
   /**
@@ -101,10 +121,12 @@ describe('composing a deployment', () => {
   it('asks the deployment to name every type a service is about', () => {
     const rows = [service('reports', [permission('reports.getRow', ['participants'])])];
     expect(compose(rows).problems).toEqual([
-      'reports is about participants, and no resource name lists reports.participants',
+      { message: 'reports is about participants, and no resource name lists reports.participants', services: ['reports'] },
     ]);
     const bound = [service('mcm', [permission('mcm.getDfsp', ['dfsps'], ['dfsps'])])];
-    expect(compose(bound).problems).toEqual(['mcm is about dfsps, and no resource name lists mcm.dfsps']);
+    expect(compose(bound).problems).toEqual([
+      { message: 'mcm is about dfsps, and no resource name lists mcm.dfsps', services: ['mcm'] },
+    ]);
     expect(
       compose(rows, {
         resourceNames: {
@@ -128,8 +150,12 @@ describe('composing a deployment', () => {
         },
       }).problems,
     ).toEqual([
-      'reports is about participants, and no resource name lists reports.participants',
-      'resource name Participant lists reports.partcipants, which reports is not about',
+      { message: 'reports is about participants, and no resource name lists reports.participants', services: ['reports'] },
+      {
+        message: 'resource name Participant lists reports.partcipants, which reports is not about',
+        resourceNames: ['Participant'],
+        services: ['reports'],
+      },
     ]);
   });
 
@@ -151,7 +177,9 @@ describe('composing a deployment', () => {
       },
     });
     expect(composition.problems).toEqual([]);
-    expect(composition.unbound).toEqual(['resource name Participant lists ledger, which this deployment does not compose']);
+    expect(composition.unbound).toEqual([
+      { message: 'resource name Participant lists ledger, which this deployment does not compose', resourceNames: ['Participant'] },
+    ]);
   });
 
   it('keeps a prefix that is an identifier as its Keto namespace, and encodes any other', () => {
@@ -165,7 +193,10 @@ describe('composing a deployment', () => {
       service('portal-shell', [permission('portal-shell.get')]),
       service('portal_2d_shell', [permission('portal_2d_shell.get')]),
     ]);
-    expect(problems).toContain('portal-shell and portal_2d_shell are both Keto namespace portal_2d_shell');
+    expect(problems).toContainEqual({
+      message: 'portal-shell and portal_2d_shell are both Keto namespace portal_2d_shell',
+      services: ['portal-shell', 'portal_2d_shell'],
+    });
   });
 
   it('refuses a prefix a permission id cannot carry', () => {
@@ -192,12 +223,22 @@ describe('a declared source', () => {
 
   it('refuses a url that is not one', () => {
     const { problems } = compose([ledger], withSource({ url: 'central-ledger:3001' }));
-    expect(problems.join('\n')).toContain('source.url "central-ledger:3001" is not an http(s) URL');
+    expect(problems).toEqual([
+      {
+        message: 'resource name Participant: source.url "central-ledger:3001" is not an http(s) URL',
+        resourceNames: ['Participant'],
+      },
+    ]);
   });
 
   it('refuses a pointer that is not one', () => {
     const { problems } = compose([ledger], withSource({ id: 'name' }));
-    expect(problems.join('\n')).toContain('source.id "name" is not a JSON Pointer');
+    expect(problems).toEqual([
+      {
+        message: 'resource name Participant: source.id "name" is not a JSON Pointer ("" or /...)',
+        resourceNames: ['Participant'],
+      },
+    ]);
   });
 });
 

@@ -1,18 +1,27 @@
 import { readFile } from 'node:fs/promises';
 
-import { stringify } from 'yaml';
-
-import { ResourceNames } from './compose';
+import { membersByService, ResourceNames } from './compose';
 import { derive } from './derive';
 import { emitModel } from './emit-model';
-import { emitRules, Serving } from './emit-rules';
+import { AccessRule, emitRules, Serving } from './emit-rules';
 import { ketoNamespace } from './keto-name';
+import { SINGLETON } from './reserved';
 import { Permission, ServiceBundle, ServiceCatalog } from './types';
 
 export * from './compose';
 export { derive } from './derive';
 export { emitModel } from './emit-model';
-export { clientPath, emitRules, Mount, reachesSubtree, Rewrite, Serving } from './emit-rules';
+export {
+  type AccessRule,
+  CALLER_HEADER,
+  clientPath,
+  emitRules,
+  type Mount,
+  MountType,
+  reachesSubtree,
+  type Rewrite,
+  type Serving,
+} from './emit-rules';
 export { ketoNamespace, PREFIX } from './keto-name';
 export * from './types';
 
@@ -72,6 +81,10 @@ export function emitCatalog(bundle: ServiceBundle): ServiceCatalog {
       resourceNames: Object.fromEntries(
         p.scopedBy.filter((r) => r.resourceName !== undefined).map((r) => [r.type, r.resourceName!]),
       ),
+      ...(p.scopedBy.some((r) => r.followsAssignment)
+        ? { followsAssignment: p.scopedBy.filter((r) => r.followsAssignment).map((r) => r.type) }
+        : {}),
+      ...(p.replaces.length > 0 ? { replaces: p.replaces } : {}),
     })),
   };
 }
@@ -85,7 +98,7 @@ export function emitDerivation(bundle: ServiceBundle): string {
   const rows = bundle.permissions.map((p) => {
     const bound = p.scopedBy.filter((r) => r.captureIndex !== undefined);
     const checks =
-      bound.length === 0 ? '__self__' : bound.map((r) => `${r.type}/{${r.param}}`).join(' + ');
+      bound.length === 0 ? SINGLETON : bound.map((r) => `${r.type}/{${r.param}}`).join(' + ');
     const scope = `scope:${p.scopedBy.map((r) => r.type).join(',') || 'none'}`;
     return [p.method.padEnd(6), p.path.padEnd(52), p.id.padEnd(38), checks.padEnd(28), scope].join(' ');
   });
@@ -99,7 +112,7 @@ export function emitDerivation(bundle: ServiceBundle): string {
 
 export interface GenerateResult {
   bundle: ServiceBundle;
-  rules: string;
+  rules: AccessRule[];
   model: string;
   catalog: string;
   derivation: string;
@@ -108,22 +121,33 @@ export interface GenerateResult {
 /**
  * Stamps every scoped type with the resource name the deployment declared
  * for it. The rules check and the grants bind the resource name, so a scoped
- * type outside the vocabulary cannot generate.
+ * type outside the vocabulary cannot generate. An operation declaring
+ * `$resources` is scoped by every other resource name too, each under its
+ * own name.
  */
 function nameScopes(bundle: ServiceBundle, names: ResourceNames): void {
-  const byMember = new Map<string, string>();
-  for (const [resourceName, declared] of Object.entries(names.resourceNames ?? {})) {
-    for (const member of declared.members) byMember.set(`${member.service}.${member.type}`, resourceName);
-  }
+  const mine = membersByService(names).get(bundle.service);
+  const every = Object.keys(names.resourceNames ?? {}).sort();
   for (const permission of bundle.permissions) {
     for (const arg of permission.scopedBy) {
-      const resourceName = byMember.get(`${bundle.service}.${arg.type}`);
+      const resourceName = mine?.get(arg.type);
       if (resourceName === undefined) {
         throw new Error(
           `${bundle.service} is about ${arg.type}, and no resource name lists ${bundle.service}.${arg.type}`,
         );
       }
       arg.resourceName = resourceName;
+    }
+    if (!permission.resources) continue;
+    const named = new Set(permission.scopedBy.map((arg) => arg.resourceName));
+    for (const resourceName of every.filter((name) => !named.has(name))) {
+      const taken = permission.scopedBy.find((arg) => arg.type === resourceName);
+      if (taken !== undefined) {
+        throw new Error(
+          `${permission.id}: its type ${resourceName} is resource name ${taken.resourceName}, so $resources cannot add resource name ${resourceName} under its own name`,
+        );
+      }
+      permission.scopedBy.push({ type: resourceName, resourceName, followsAssignment: true });
     }
   }
 }
@@ -146,7 +170,7 @@ export function generate(
   }
   return {
     bundle: serviceBundle,
-    rules: stringify(emitRules(serviceBundle, serving), { lineWidth: 0 }),
+    rules: emitRules(serviceBundle, serving),
     model: emitModel(serviceBundle),
     catalog: JSON.stringify(emitCatalog(serviceBundle), null, 2),
     derivation: emitDerivation(serviceBundle),

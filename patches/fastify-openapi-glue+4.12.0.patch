@@ -1,0 +1,15 @@
+diff --git a/node_modules/fastify-openapi-glue/index.d.ts b/node_modules/fastify-openapi-glue/index.d.ts
+index 79c423a..b828e9f 100644
+--- a/node_modules/fastify-openapi-glue/index.d.ts
++++ b/node_modules/fastify-openapi-glue/index.d.ts
+@@ -11,7 +11,9 @@ type OperationResolver = (
+ 	operationId: string,
+ 	method: string,
+ 	path: string,
+-) => ((req: FastifyRequest, res: FastifyReply) => void) | RouteOptions;
++) =>
++	| ((req: FastifyRequest, res: FastifyReply) => void)
++	| Partial<Omit<RouteOptions, "method" | "url">>;
+ 
+ export interface FastifyOpenapiGlueOptions {
+ 	specification: object | string;

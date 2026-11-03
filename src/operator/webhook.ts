@@ -1,9 +1,15 @@
+import { StatusCodes } from 'http-status-codes';
+
 import { ResourceName, sourceProblems } from '../authzgen/compose';
 import { derive } from '../authzgen/derive';
+import { serviceOf } from '../authzgen/permission';
+import { messagesOf } from '../authzgen/problem';
 import { ServiceCatalog } from '../authzgen/types';
-import { Exclusion, roleBreaks, ruleProblems } from '../iam/exclusions';
-import { DeploymentObject, exclusionOf, HELD_BY_UNAPPLIED, idOf, roleOf, RoleSpec, SeparationSpec } from '../iam/objects';
-import { indexCatalogs, validateRoles } from '../iam/roles';
+import { broken, Exclusion, holdingsOf, roleBreaks, ruleProblems, Within } from '../iam/exclusions';
+import { History, resolveRole } from '../iam/history';
+import { Kind } from '../iam/kinds';
+import { DeploymentObject, exclusionOf, idOf, roleOf, RoleSpec, SeparationSpec } from '../iam/objects';
+import { indexCatalogs, namedByProblem, rolesNaming, validateRoles } from '../iam/roles';
 import { AuthzDocumentResource, fromResource } from './sources';
 
 /**
@@ -15,7 +21,13 @@ import { AuthzDocumentResource, fromResource } from './sources';
 
 export const WEBHOOK_PATH = '/validate';
 
-type Kind = 'AuthzDocument' | 'AuthzRole' | 'AuthzSeparation' | 'AuthzResourceName';
+const REVIEW = { apiVersion: 'admission.k8s.io/v1', kind: 'AdmissionReview' } as const;
+
+/** What a reviewed request does to its object; one that removes it carries it as the old one. */
+export const AdmissionOperation = { create: 'CREATE', update: 'UPDATE', delete: 'DELETE' } as const;
+
+/** The prefix a document is derived under when admission only checks that it derives, before any route names its own. */
+const DOCUMENT_PREFIX = 'document';
 
 interface Incoming extends DeploymentObject {
   kind?: string;
@@ -38,39 +50,63 @@ interface AdmissionReview {
 export interface AdmissionContext {
   /** Absent until the IAM has composed once. */
   catalog?: ServiceCatalog[];
+  /** The IAM's own resource names, the only ones a grant names by id. */
+  own: () => ReadonlySet<string>;
+  /** The resource name roles go by, which a grant names one under. */
+  roleName: () => string | undefined;
   /** Every stored object of a kind, for names held elsewhere and the rules a role meets. */
   stored: (kind: Kind) => Promise<DeploymentObject[]>;
-  /** How many subjects hold a role, to refuse making a held role every subject's. */
-  holders: (role: string) => Promise<number>;
+  /** Every role instance each subject holds, as the graph has it. */
+  held: () => Promise<Map<string, Array<{ role: string; resources: Record<string, string> }>>>;
+  /** What became of the permissions services no longer offer. */
+  history: () => History;
 }
 
 const services = (catalog: ServiceCatalog[]) => new Set(catalog.map((c) => c.service));
 
 const composedPermissions = (ids: string[], catalog: ServiceCatalog[]): string[] => {
   const composed = services(catalog);
-  return ids.filter((id) => composed.has(id.split('.')[0]!));
+  return ids.filter((id) => composed.has(serviceOf(id)));
 };
 
-async function roleProblems(object: Incoming, old: Incoming | undefined, context: AdmissionContext): Promise<string[]> {
+async function roleProblems(
+  object: Incoming,
+  old: Incoming | undefined,
+  context: AdmissionContext,
+  warnings: string[],
+): Promise<string[]> {
   const catalog = context.catalog!;
   const name = object.metadata?.name ?? '';
-  const role = roleOf(object.spec as RoleSpec);
   const index = indexCatalogs(catalog);
+  const resolved = resolveRole(roleOf(object.spec as RoleSpec), context.history(), index);
+  warnings.push(...resolved.warnings.map((w) => `${name}: ${w}`));
+  const role = resolved.role;
   const composed = new Set(composedPermissions(role.grants.map((g) => g.permission), catalog));
   const checked = { ...role, grants: role.grants.filter((g) => composed.has(g.permission)) };
-  const rules: Exclusion[] = (await context.stored('AuthzSeparation')).map((s) =>
+  const rules: Exclusion[] = (await context.stored(Kind.separation)).map((s) =>
     exclusionOf(s.metadata?.name ?? '', (s as Incoming).spec as SeparationSpec),
   );
 
   const problems: string[] = [];
-  if (role.heldBy !== undefined) problems.push(`${name}: ${HELD_BY_UNAPPLIED}`);
   if (checked.grants.length > 0) {
-    problems.push(...validateRoles({ roles: { [name]: checked }, exclusions: rules }, index));
+    problems.push(...validateRoles({ roles: { [name]: checked }, exclusions: rules }, index, context.own()));
   }
   for (const problem of roleBreaks(checked, rules, index)) problems.push(`${name}: its grants span ${problem}`);
-  if (role.heldBy !== undefined && old !== undefined && (old.spec as RoleSpec | undefined)?.heldBy === undefined) {
-    const held = await context.holders(name);
-    if (held > 0) problems.push(`${name}: ${held} subjects are assigned it; a role every subject holds is assigned to nobody`);
+
+  const holding = [...(await context.held())].filter(([, instances]) => instances.some((i) => i.role === name));
+  if (role.heldBy !== undefined && old !== undefined && (old.spec as RoleSpec | undefined)?.heldBy === undefined && holding.length > 0) {
+    problems.push(`${name}: ${holding.length} subjects are assigned it; a role every subject holds is assigned to nobody`);
+  }
+  if (old !== undefined && rules.length > 0 && holding.length > 0) {
+    const roles = Object.fromEntries(
+      (await context.stored(Kind.role)).map((o) => [o.metadata?.name ?? '', roleOf((o as Incoming).spec as RoleSpec)]),
+    );
+    const file = { roles: { ...roles, [name]: checked } };
+    for (const [subject, instances] of holding) {
+      for (const breach of broken(holdingsOf(file, instances), rules, index)) {
+        problems.push(`${name}: the change would leave ${subject}, who holds it, breaking ${breach}`);
+      }
+    }
   }
   return [...new Set(problems)];
 }
@@ -79,8 +115,8 @@ async function separationProblems(object: Incoming, context: AdmissionContext): 
   const catalog = context.catalog!;
   const rule = exclusionOf(object.metadata?.name ?? '', object.spec as SeparationSpec);
   const problems = ruleProblems(rule, indexCatalogs(catalog), services(catalog));
-  if (rule.within === 'resource' && rule.resourceName !== undefined) {
-    const declared = (await context.stored('AuthzResourceName')).map((o) => o.metadata?.name);
+  if (rule.within === Within.resource && rule.resourceName !== undefined) {
+    const declared = (await context.stored(Kind.resourceName)).map((o) => o.metadata?.name);
     if (!declared.includes(rule.resourceName)) problems.push(`${rule.name}: no resource name called ${rule.resourceName}`);
   }
   return problems;
@@ -89,7 +125,7 @@ async function separationProblems(object: Incoming, context: AdmissionContext): 
 function resourceNameProblems(object: Incoming, context: AdmissionContext): string[] {
   const label = object.metadata?.name ?? '';
   const spec = object.spec as unknown as ResourceName;
-  const problems = sourceProblems(label, spec);
+  const problems = messagesOf(sourceProblems(label, spec));
   const byService = new Map(context.catalog!.map((c) => [c.service, new Set(c.resourceTypes)]));
   for (const member of spec.members ?? []) {
     const types = byService.get(member.service);
@@ -116,19 +152,39 @@ export async function review(
 ): Promise<AdmissionReview & { response: object }> {
   const request = (body as AdmissionReview)?.request;
   const uid = request?.uid ?? '';
+  const warnings: string[] = [];
   const answer = (allowed: boolean, message?: string) => ({
-    apiVersion: 'admission.k8s.io/v1',
-    kind: 'AdmissionReview',
-    response: { uid, allowed, ...(message !== undefined ? { status: { code: 422, message } } : {}) },
+    ...REVIEW,
+    response: {
+      uid,
+      allowed,
+      ...(message !== undefined ? { status: { code: StatusCodes.UNPROCESSABLE_ENTITY, message } } : {}),
+      ...(warnings.length > 0 ? { warnings } : {}),
+    },
   });
+
+  if (request?.operation === AdmissionOperation.delete) {
+    const gone = request.oldObject;
+    if (gone === undefined) return answer(false, 'the review carries no object');
+    if (request.kind?.kind !== Kind.role) return answer(true);
+    if (context === undefined || context.catalog === undefined) {
+      return answer(false, `${idOf(Kind.role, gone)}: the IAM has composed nothing yet to check it against`);
+    }
+    const name = gone.metadata?.name ?? '';
+    const roles = Object.fromEntries(
+      (await context.stored(Kind.role)).map((o) => [o.metadata?.name ?? '', roleOf((o as Incoming).spec as RoleSpec)]),
+    );
+    const naming = rolesNaming(name, roles, context.roleName());
+    return naming.length === 0 ? answer(true) : answer(false, `${idOf(Kind.role, gone)}: ${namedByProblem(name, naming)}`);
+  }
 
   const object = request?.object;
   if (object === undefined) return answer(false, 'the review carries no object');
-  const kind = (request?.kind?.kind ?? object.kind ?? 'AuthzDocument') as Kind;
+  const kind = (request?.kind?.kind ?? object.kind ?? Kind.document) as Kind;
 
   try {
-    if (kind === 'AuthzDocument') {
-      derive(await fromResource(object as AuthzDocumentResource), 'document');
+    if (kind === Kind.document) {
+      derive(await fromResource(object as AuthzDocumentResource), DOCUMENT_PREFIX);
       return answer(true);
     }
     if (context === undefined || context.catalog === undefined) {
@@ -138,9 +194,9 @@ export async function review(
     if (elsewhere !== undefined) return answer(false, `${idOf(kind, object)}: ${elsewhere}`);
 
     const problems =
-      kind === 'AuthzRole'
-        ? await roleProblems(object, request?.oldObject, context)
-        : kind === 'AuthzSeparation'
+      kind === Kind.role
+        ? await roleProblems(object, request?.oldObject, context, warnings)
+        : kind === Kind.separation
           ? await separationProblems(object, context)
           : resourceNameProblems(object, context);
     return problems.length === 0 ? answer(true) : answer(false, `${idOf(kind, object)}:\n  ${problems.join('\n  ')}`);

@@ -1,6 +1,7 @@
 import { DocumentError, readDocument } from '@mojaloop/authz/document';
 
 import { PREFIX } from './keto-name';
+import { permissionId } from './permission';
 import { Permission, ScopedType, ServiceBundle } from './types';
 
 /**
@@ -15,12 +16,13 @@ import { Permission, ScopedType, ServiceBundle } from './types';
  *
  *   permission id   <service>.<operationId>, so operationId is part of the
  *                   authorization contract and renaming one is a breaking change
- *   scoped by       x-authz.scopedBy ?? [the type of the outermost parameter]
+ *   scoped by       x-authz.scopedBy ?? [the type of the outermost parameter];
+ *                   `$resources` adds every resource name once composed
  *   resource type   the literal segment preceding a path parameter
  *   bound type      a scoping type the path binds an id for; it is checked as
  *                   <type>/<id>, and every scoping type is handed to the
  *                   service to narrow by, whether bound or not
- *   singleton       an operation with no bound type, checked against __self__
+ *   singleton       an operation with no bound type, checked against $self
  *   internal        x-authz.internal: no permission, and no rule reaches it
  *
  * How a caller proves who they are is the deployment's business. A document's
@@ -82,7 +84,7 @@ export function derive(doc: Doc, service: string): ServiceBundle {
       .sort((a, b) => (a.captureIndex ?? Infinity) - (b.captureIndex ?? Infinity));
 
     return {
-      id: `${service}.${operation.operationId}`,
+      id: permissionId(service, operation.operationId),
       name: operation.operationId,
       operationId: operation.operationId,
       method: operation.method,
@@ -90,6 +92,8 @@ export function derive(doc: Doc, service: string): ServiceBundle {
       summary: operation.summary,
       deprecated: operation.deprecated,
       scopedBy,
+      resources: operation.resources,
+      replaces: operation.replaces.map((old) => permissionId(service, old)),
     };
   });
 

@@ -1,4 +1,5 @@
 import { ketoNamespace } from './keto-name';
+import { ALL, SINGLETON } from './reserved';
 import { ServiceBundle } from './types';
 
 /**
@@ -12,7 +13,7 @@ import { ServiceBundle } from './types';
  *
  * Objects carry both type and id, so one namespace serves every resource
  * type a service has: `<service>:<type>/<id>` for a resource,
- * `<type>/__all__` for the type-wide object, `__self__` for the singleton.
+ * `<type>/$all` for the type-wide object, `$self` for the singleton.
  */
 
 /** Declared once per deployment; every staged model repeats them byte-identically. */
@@ -35,8 +36,8 @@ export class Resource implements Namespace {}
 /** A service's namespace declaration. */
 export function emitNamespace(bundle: ServiceBundle): string {
   return (
-    `// ${bundle.title}: objects are "<type>/<id>", "<type>/__all__" for the\n` +
-    `// type-wide object, "__self__" for the service singleton.\n` +
+    `// ${bundle.title}: objects are "<type>/<id>", "<type>/${ALL}" for the\n` +
+    `// type-wide object, "${SINGLETON}" for the service singleton.\n` +
     `export class ${ketoNamespace(bundle.service)} implements Namespace {}\n`
   );
 }

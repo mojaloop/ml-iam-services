@@ -1,0 +1,252 @@
+openapi: 3.1.0
+info:
+  title: IAM controller
+  version: 1.0.0
+  description: >-
+    The single writer of grants and memberships. The API process hands it
+    every assignment and every retired resource, and reads the composition
+    from it; a network rule admits nothing else. Any replica answers; one
+    that does not hold the lease hands those requests to the one that does,
+    and answers 503 while no replica holds it.
+
+servers:
+  - url: /
+
+components:
+  schemas:
+    ResourceRef:
+      type: object
+      required: [resourceName, id]
+      additionalProperties: false
+      properties:
+        resourceName:
+          type: string
+          minLength: 1
+        id:
+          type: string
+          minLength: 1
+    Listing:
+      type: object
+      required: [resources, stale]
+      additionalProperties: false
+      properties:
+        resources:
+          type: array
+          items:
+            $ref: '#/components/schemas/ResourceRef'
+        stale:
+          description: Per resource name whose source did not answer as declared, why; its last good read stands in.
+          type: object
+          additionalProperties:
+            type: object
+            required: [reason]
+            additionalProperties: false
+            properties:
+              reason:
+                type: string
+              since:
+                type: string
+              misdeclared:
+                type: boolean
+                const: true
+    Write:
+      type: object
+      required: [subject, role]
+      additionalProperties: false
+      properties:
+        subject:
+          type: string
+          minLength: 1
+        role:
+          type: string
+          minLength: 1
+        resources:
+          type: object
+          additionalProperties:
+            type: string
+            minLength: 1
+        by:
+          description: >-
+            Who hands the role out, for a write made through the public API;
+            absent for a service on the internal one.
+          type: object
+          required: [subject, roles, reach]
+          additionalProperties: false
+          properties:
+            subject:
+              type: string
+              minLength: 1
+            roles:
+              description: The roles the caller's scope names, or $all.
+              $ref: '#/components/schemas/Named'
+            reach:
+              description: Per resource name, what the caller's scope for the operation reaches of it.
+              type: object
+              additionalProperties:
+                $ref: '#/components/schemas/Named'
+    Named:
+      oneOf:
+        - type: string
+          const: $all
+        - type: array
+          items:
+            type: string
+    Problems:
+      type: object
+      required: [errors]
+      properties:
+        errors:
+          type: array
+          items:
+            type: string
+  responses:
+    Refused:
+      description: Refused, with the reasons
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Problems'
+
+paths:
+  /health:
+    get:
+      operationId: getHealth
+      summary: Reports whether the controller is running
+      responses:
+        '200':
+          description: The controller is running
+
+  /ready:
+    get:
+      operationId: getReady
+      summary: Reports whether this replica answers, as the leader that applied the deployment's roles or a standby that composed
+      responses:
+        '200':
+          description: Answering
+        '503':
+          description: Still starting
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Problems'
+
+  /composition:
+    get:
+      operationId: getComposition
+      summary: Serves what the controller composed and applied
+      description: >-
+        The catalog, the resource names, the live roles and separation rules,
+        what waits, and the record of the last apply. The ETag is the one the
+        published ConfigMap carries, and an If-None-Match naming it answers
+        304.
+      responses:
+        '200':
+          description: The composition
+        '304':
+          description: Unchanged since the ETag asked about
+
+  /derivation.txt:
+    get:
+      operationId: getDerivation
+      summary: Explains, per service, how each permission was derived from its document
+      responses:
+        '200':
+          description: The derivation, for an operator to read
+
+  /access-rules.yml:
+    get:
+      operationId: getAccessRules
+      summary: Serves the rules the gateway enforces
+      responses:
+        '200':
+          description: The access rules
+
+  /keto-namespaces.ts:
+    get:
+      operationId: getKetoNamespaces
+      summary: Serves the Keto model
+      responses:
+        '200':
+          description: The model
+
+  /assignments:
+    post:
+      operationId: writeAssignment
+      summary: Adds a subject to a role instance, after checking it against every rule
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/Write'
+      responses:
+        '200':
+          description: The role instance the subject now holds
+        '422':
+          $ref: '#/components/responses/Refused'
+    delete:
+      operationId: removeAssignment
+      summary: Removes a subject from a role instance
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/Write'
+      responses:
+        '200':
+          description: The role instance the subject no longer holds
+        '422':
+          $ref: '#/components/responses/Refused'
+
+  /resources:
+    get:
+      operationId: listResources
+      summary: The resources an operator can be offered
+      description: >-
+        What the provisioning authority recorded, and what each declared source
+        lists now, read for this request. Only the controller knows the
+        deployment's resource
+        names, so only it reads their sources.
+      parameters:
+        - name: resourceName
+          in: query
+          required: false
+          schema:
+            type: string
+            minLength: 1
+      responses:
+        '200':
+          description: Every resource, of one name or of all of them
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Listing'
+    post:
+      operationId: addResource
+      summary: Records that a resource exists
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ResourceRef'
+      responses:
+        '200':
+          description: The resource is recorded
+        '422':
+          $ref: '#/components/responses/Refused'
+    delete:
+      operationId: removeResource
+      summary: Removes a resource and every role instance over it
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ResourceRef'
+      responses:
+        '200':
+          description: The subjects now holding no role at all
+        '422':
+          $ref: '#/components/responses/Refused'
